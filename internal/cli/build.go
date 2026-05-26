@@ -312,7 +312,7 @@ the build at <build-url>. When the build has exactly one pending
 input, the command operates on that input by default. When two or
 more inputs are pending, --input-id <id> is required.
 
-See specs/build §"Respond to a pending input step".`,
+See docs/schema.md §3.9 and specs/build §"Respond to a pending input step".`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runBuildInput(cmd, flags, args[0], args[1], inputID)
