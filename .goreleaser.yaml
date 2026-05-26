@@ -1,0 +1,92 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: jk
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: jk
+    main: ./cmd/jk
+    binary: jk
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/addozhang/jk/internal/cli.version={{.Version}}
+    flags:
+      - -trimpath
+
+archives:
+  - id: jk
+    ids:
+      - jk
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: "New Features"
+      regexp: "^feat"
+      order: 0
+    - title: "Bug Fixes"
+      regexp: "^fix"
+      order: 1
+    - title: "Other"
+      order: 999
+
+brews:
+  - name: jk
+    ids:
+      - jk
+    repository:
+      owner: addozhang
+      name: homebrew-tap
+      # Uses HOMEBREW_TAP_GITHUB_TOKEN secret in the release workflow.
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/addozhang/jk"
+    description: "Pipeline-native Jenkins CLI"
+    license: "Apache-2.0"
+    install: |
+      bin.install "jk"
+    test: |
+      system "#{bin}/jk", "version"
+
+release:
+  github:
+    owner: addozhang
+    name: jk
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"

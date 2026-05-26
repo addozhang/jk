@@ -1,0 +1,83 @@
+# Jenkins Configuration as Code definition for the jk e2e harness.
+#
+# JCasC reads this file at startup (path is set via CASC_JENKINS_CONFIG in
+# the Dockerfile) and brings the live Jenkins state in line with the YAML.
+# Re-running with a changed file requires either a container restart or a
+# manual reload from the JCasC UI.
+#
+# Environment variables (substituted via ${VAR}):
+#   JK_E2E_ADMIN_USER   - admin login (defaults to "admin" in compose .env)
+#   JK_E2E_ADMIN_PASS   - admin password (committed default in compose .env;
+#                         harness only, NEVER reuse for real Jenkins). The
+#                         e2e tests use this same value as the "secret" in
+#                         the jk credentials store — Jenkins basic auth
+#                         accepts the password identically to an API token,
+#                         which sidesteps the apitoken-property plugin's
+#                         lack of a public API for injecting a known token
+#                         value.
+jenkins:
+  systemMessage: "jk e2e Jenkins — do not use for real work."
+  numExecutors: 2
+  mode: NORMAL
+  # Standard CSRF crumb issuer is enabled (Jenkins default since 2.222).
+  # The harness's POST helpers fetch a crumb explicitly; the production
+  # transport's crumb cache + retry is exercised by
+  # internal/jenkins/crumb_test.go against an httptest.Server.
+  crumbIssuer: "standard"
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JK_E2E_ADMIN_USER:-admin}"
+          password: "${JK_E2E_ADMIN_PASS}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+# Job definitions via the Job DSL plugin. Each job reads its Jenkinsfile
+# from the baked-in /var/jenkins_home/pipelines directory; we use
+# readFileFromWorkspace-style inline definitions so no SCM is required.
+jobs:
+  - script: |
+      pipelineJob('hello') {
+        definition {
+          cps {
+            script(new File('/var/jenkins_home/pipelines/hello.Jenkinsfile').text)
+            sandbox(true)
+          }
+        }
+      }
+  - script: |
+      pipelineJob('params') {
+        parameters {
+          stringParam('GREETING', 'hello', 'How to greet')
+          stringParam('TARGET', 'world', 'Who to greet')
+          booleanParam('LOUD', false, 'Use uppercase')
+        }
+        definition {
+          cps {
+            script(new File('/var/jenkins_home/pipelines/params.Jenkinsfile').text)
+            sandbox(true)
+          }
+        }
+      }
+  - script: |
+      folder('team')
+  - script: |
+      pipelineJob('team/parallel') {
+        definition {
+          cps {
+            script(new File('/var/jenkins_home/pipelines/parallel.Jenkinsfile').text)
+            sandbox(true)
+          }
+        }
+      }
+  - script: |
+      pipelineJob('input') {
+        definition {
+          cps {
+            script(new File('/var/jenkins_home/pipelines/input.Jenkinsfile').text)
+            sandbox(true)
+          }
+        }
+      }

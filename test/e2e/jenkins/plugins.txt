@@ -1,0 +1,21 @@
+# Minimum plugin set for the e2e harness. Each line is `<short-name>:latest`
+# (or :<version> to pin). Jenkins's plugin-installation-manager resolves the
+# transitive closure; we list only what the harness directly relies on.
+#
+# Why each one:
+#   workflow-aggregator           - Pipeline support (`pipeline { ... }` DSL).
+#   pipeline-stage-view           - `/wfapi/runs/<id>/describe` endpoint.
+#   pipeline-model-definition     - Declarative pipelines.
+#   pipeline-rest-api             - Underlying REST surface for stage data.
+#   git                           - Required transitively by pipeline.
+#   configuration-as-code         - JCasC: seed admin user + jobs.
+#   job-dsl                       - JCasC uses Job DSL to declare jobs.
+#   credentials                   - JCasC needs credentials domain.
+configuration-as-code:latest
+job-dsl:latest
+workflow-aggregator:latest
+pipeline-stage-view:latest
+pipeline-model-definition:latest
+pipeline-rest-api:latest
+git:latest
+credentials:latest
