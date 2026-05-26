@@ -149,4 +149,4 @@
 - [x] 17.3 README section "First-time setup": `jk auth add` + `SSL_CERT_FILE` walkthrough
 - [x] 17.4 README section "Scripting with jk": exit code table, JSON example, `schemaVersion` pinning advice
 - [x] 17.5 Link `docs/schema.md` from README and from every command's `--help`
-- [ ] 17.6 Tag `v0.1.0`, publish release, dogfood for 2 weeks per validation assumptions in proposal/design
+- [x] 17.6 Tag `v0.1.0`, publish release, dogfood for 2 weeks per validation assumptions in proposal/design
