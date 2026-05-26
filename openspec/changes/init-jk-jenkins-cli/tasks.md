@@ -144,9 +144,9 @@
 
 ## 17. Documentation & launch readiness
 
-- [ ] 17.1 README: 60-second overview (what jk is, what it isn't), install, three example commands
-- [ ] 17.2 README section "URL conventions": every supported URL shape with examples
-- [ ] 17.3 README section "First-time setup": `jk auth add` + `SSL_CERT_FILE` walkthrough
-- [ ] 17.4 README section "Scripting with jk": exit code table, JSON example, `schemaVersion` pinning advice
-- [ ] 17.5 Link `docs/schema.md` from README and from every command's `--help`
+- [x] 17.1 README: 60-second overview (what jk is, what it isn't), install, three example commands
+- [x] 17.2 README section "URL conventions": every supported URL shape with examples
+- [x] 17.3 README section "First-time setup": `jk auth add` + `SSL_CERT_FILE` walkthrough
+- [x] 17.4 README section "Scripting with jk": exit code table, JSON example, `schemaVersion` pinning advice
+- [x] 17.5 Link `docs/schema.md` from README and from every command's `--help`
 - [ ] 17.6 Tag `v0.1.0`, publish release, dogfood for 2 weeks per validation assumptions in proposal/design

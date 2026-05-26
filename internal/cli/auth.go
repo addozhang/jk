@@ -185,7 +185,7 @@ func newAuthListCommand(flags *GlobalFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List configured Jenkins hosts",
-		Long:  "Prints the configured hosts to stdout in insertion order. Never prints tokens.",
+		Long:  "Prints the configured hosts to stdout in insertion order. Never prints tokens. See docs/schema.md §3.1 for the response shape.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAuthList(cmd, flags)
