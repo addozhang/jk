@@ -1,7 +1,7 @@
 # Binaries
 /bin/
 /dist/
-jk
+/jk
 
 # Test artifacts
 *.test
