@@ -290,7 +290,9 @@ MVP (v0.1.0) "done" criteria — all must be true before tagging a release:
 
 ## Open Questions
 
-1. **Credentials file encryption**: MVP uses 0600 plaintext at `~/.config/jk/credentials`. Deferred to v0.2 — revisit when introducing OS keychain integration (macOS Keychain / Linux Secret Service / Windows Credential Manager). No action required during MVP.
+_None at present._ Past decisions:
+
+- **Credentials file encryption (2026-05-26, deferred to v0.2)**: MVP stores plaintext API tokens at `~/.config/jk/credentials` with file mode `0600`. This matches the threat model the rest of the CLI assumes (a trusted developer machine; `~/.aws/credentials` and `~/.kube/config` use the same posture). OS-keychain integration (macOS Keychain / Linux Secret Service / Windows Credential Manager) is deferred until at least one user reports it as blocking; the deferral is revisited at the v0.2 planning checkpoint regardless. No code changes required during MVP.
 
 ## Relationship to OpenSpec
 
