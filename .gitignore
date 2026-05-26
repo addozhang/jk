@@ -1,0 +1,47 @@
+# Binaries
+/bin/
+/dist/
+jk
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace files (we use go.mod)
+go.work
+go.work.sum
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Agent tooling (personal config, not project code)
+.agents/
+.opencode/
+
+# Local environment
+.env
+.env.local
+*.local
+# Exception: the e2e harness ships a fixed .env with throwaway
+# credentials so `make e2e-up` works without manual setup. The values
+# are documented as harness-only in test/e2e/.env.
+!test/e2e/.env
+
+# Secrets (defensive — should never exist in repo anyway)
+credentials
+*.pem
+*.key
+*.token
+
+# Exception: the e2e harness ships a self-signed TLS cert + key for
+# localhost only, so `make e2e-up` works without manual setup. Same
+# threat model as the committed admin password in test/e2e/.env —
+# never reuse outside the harness. See test/e2e/README.md.
+!test/e2e/nginx/server.crt
+!test/e2e/nginx/server.key

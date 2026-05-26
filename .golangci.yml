@@ -1,0 +1,68 @@
+# golangci-lint v2 configuration.
+# Run: `make lint`. SPEC.md §Always-do requires zero warnings before push.
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # Correctness
+    - errcheck         # unchecked errors are a §Never-do
+    - govet
+    - staticcheck      # absorbs SA*, S*, ST* linters in v2
+    - ineffassign
+    - unused
+    # Bug-prone patterns
+    - bodyclose        # always Close() HTTP response bodies
+    - errorlint        # err comparisons must use errors.Is/As
+    - nilerr
+    - rowserrcheck
+    # Style guardrails enforced by §Code Style
+    - gocritic
+    - misspell
+    - revive           # replaces deprecated golint
+    - unconvert
+    - unparam
+
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment optimizes struct memory layout. It conflicts with
+        # readability (we group fields by purpose, not size) and matters only
+        # for types instantiated in hot paths — jk has no such types.
+        - fieldalignment
+    revive:
+      rules:
+        - name: exported          # SPEC.md §Code Style: every exported symbol has a godoc comment
+        - name: var-naming
+        - name: package-comments
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+  exclusions:
+    rules:
+      # Tests are allowed to be more relaxed about exported godoc and unparam.
+      - path: _test\.go
+        linters:
+          - revive
+          - unparam
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/addozhang/jk
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
