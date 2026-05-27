@@ -450,7 +450,7 @@ func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, input
 	// params that were not supplied; an empty result means the v0.1
 	// proceedEmpty endpoint should be used.
 	var submitParams []jenkins.InputParameterValue
-	var proceedText string
+	var proceedText, proceedURL string
 	if proceed {
 		declared := declaredParametersFor(pending, resolvedID)
 		submitParams, err = validateInputParameters(declared, supplied)
@@ -458,11 +458,12 @@ func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, input
 			return err
 		}
 		proceedText = proceedTextFor(pending, resolvedID)
+		proceedURL = proceedURLFor(pending, resolvedID)
 	}
 
 	submitCtx, cancelSubmit := cc.withTimeout(cmd.Context())
 	defer cancelSubmit()
-	if err = cc.client.SubmitInput(submitCtx, ref, resolvedID, proceed, proceedText, submitParams); err != nil {
+	if err = cc.client.SubmitInput(submitCtx, ref, resolvedID, proceed, proceedText, proceedURL, submitParams); err != nil {
 		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
 	}
 
@@ -504,6 +505,15 @@ type pendingInputItem struct {
 	ProceedText string                  `json:"proceedText"`
 	Message     string                  `json:"message"`
 	Inputs      []pendingInputParameter `json:"inputs"`
+	// ProceedURL is the server-rooted path Jenkins itself advertises
+	// for parameterized submission, e.g.
+	// `/job/svc/42/wfapi/inputSubmit?inputId=Deploy`. When non-empty
+	// the client POSTs to <Host>+<ProceedURL>; when empty it falls
+	// back to the legacy `/input/<id>/submit` endpoint. The wfapi
+	// path is the only one Jenkins's workflow plugin accepts cleanly
+	// for parameterized input — the legacy `/input/<id>/submit`
+	// records "Rejected by <user>" and aborts the build.
+	ProceedURL string `json:"proceedUrl"`
 }
 
 // pendingInputParameter mirrors one entry under wfapi pendingInputActions[].inputs[].
@@ -611,6 +621,20 @@ func proceedTextFor(pending []pendingInputItem, id string) string {
 	for _, it := range pending {
 		if it.ID == id {
 			return it.ProceedText
+		}
+	}
+	return ""
+}
+
+// proceedURLFor returns the server-rooted submission path Jenkins
+// advertises in wfapi pendingInputActions[].proceedUrl. Empty when
+// the id is not found or wfapi did not include it (older Jenkins or
+// non-workflow input). Callers fall back to /input/<id>/submit when
+// empty.
+func proceedURLFor(pending []pendingInputItem, id string) string {
+	for _, it := range pending {
+		if it.ID == id {
+			return it.ProceedURL
 		}
 	}
 	return ""
@@ -1084,7 +1108,7 @@ type buildClientSurface interface {
 	GetBuildStatus(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetBuildStages(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetPendingInputs(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
-	SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, proceedText string, parameters []jenkins.InputParameterValue) error
+	SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, proceedText, proceedURL string, parameters []jenkins.InputParameterValue) error
 	StreamConsoleLog(ctx context.Context, ref *jenkinsurl.Ref, w io.Writer, follow bool) error
 	GetStageLog(ctx context.Context, ref *jenkinsurl.Ref, flowNodeID string) ([]byte, error)
 	GetNodeDescribe(ctx context.Context, ref *jenkinsurl.Ref, flowNodeID string) ([]byte, error)

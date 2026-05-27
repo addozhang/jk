@@ -181,7 +181,7 @@ Returns the current state of a build.
 PendingInput:
   id: string                       # experimental
   message: string                  # experimental
-  ok: string                       # experimental — label of the "proceed" button; also the value of the `proceed` form field that `jk build input` sends to Jenkins's /input/<id>/submit
+  ok: string                       # experimental — label of the "proceed" button; also the value of the `proceed` form field that `jk build input` sends to the submit endpoint (§3.9)
   parameters: Parameter[]          # stable — input-step parameters (reuses §3.4 shape); consumed by `jk build input -p` validation
 ```
 
@@ -228,14 +228,16 @@ Unknown keys, invalid choices, or required parameters with no value (and no `def
 
 The endpoint and wire format are chosen by the action and parameter set:
 
-| Action  | Parameters supplied         | Endpoint                       | Body                                                                          |
-|---------|------------------------------|--------------------------------|--------------------------------------------------------------------------------|
-| `proceed` | none, none declared        | `POST /input/<id>/proceedEmpty` | empty                                                                          |
-| `proceed` | declared, all defaulted    | `POST /input/<id>/submit`       | `json=<URL-encoded JSON>&proceed=<ok-label>`                                  |
-| `proceed` | any supplied               | `POST /input/<id>/submit`       | `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>&proceed=<ok-label>` |
-| `abort`   | (ignored)                  | `POST /input/<id>/abort`        | empty                                                                          |
+| Action  | Parameters supplied         | Endpoint                                                        | Body                                                                          |
+|---------|------------------------------|------------------------------------------------------------------|--------------------------------------------------------------------------------|
+| `proceed` | none, none declared        | `POST /input/<id>/proceedEmpty`                                  | empty                                                                          |
+| `proceed` | declared, all defaulted    | `POST <proceedUrl>` (wfapi-advertised; legacy fallback `POST /input/<id>/submit`) | `json=<URL-encoded JSON>&proceed=<ok-label>`                                  |
+| `proceed` | any supplied               | `POST <proceedUrl>` (wfapi-advertised; legacy fallback `POST /input/<id>/submit`) | `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>&proceed=<ok-label>` |
+| `abort`   | (ignored)                  | `POST /input/<id>/abort`                                         | empty                                                                          |
 
-The `proceed=<ok-label>` form field is **required** by Jenkins on `/submit` — without it Jenkins returns `HTTP 200` but records `Rejected by <user>` in the build log and aborts the run. The label is sourced from the pending input's `ok` field (§3.7 `PendingInput.ok`) and threaded through automatically; users do not need to supply it.
+For parameterized submissions, jk uses the `proceedUrl` path that Jenkins itself advertises in the `/wfapi/pendingInputActions` response (typically `/job/<...>/wfapi/inputSubmit?inputId=<id>`). The legacy `/input/<id>/submit` path is kept as a fallback for older Jenkins servers whose wfapi response omits `proceedUrl`. The wfapi path is the only one modern Jenkins accepts cleanly: posting parameterized input to `/input/<id>/submit` returns `HTTP 200` but silently records `Rejected by <user>` and aborts the build (confirmed v0.2.0 dogfood against the deploy-input harness pipeline).
+
+The `proceed=<ok-label>` form field is **required** on both endpoints — without it Jenkins returns `HTTP 200` but records `Rejected by <user>` in the build log and aborts the run. The label is sourced from the pending input's `ok` field (§3.7 `PendingInput.ok`) and threaded through automatically; users do not need to supply it.
 
 Returns confirmation that the input was submitted:
 

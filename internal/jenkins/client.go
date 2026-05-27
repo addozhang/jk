@@ -316,23 +316,34 @@ type InputParameterValue struct {
 //
 // Endpoint selection:
 //   - proceed == false              → POST /input/<id>/abort
-//     (parameters and proceedText IGNORED with no error; the CLI
-//     layer emits a warning when a user supplies -p with abort)
+//     (parameters, proceedText, and proceedURL IGNORED with no
+//     error; the CLI layer emits a warning when a user supplies -p
+//     with abort)
 //   - proceed == true, no parameters → POST /input/<id>/proceedEmpty
 //     (v0.1 path, unchanged)
-//   - proceed == true, parameters    → POST /input/<id>/submit with
-//     Content-Type: application/x-www-form-urlencoded and body
-//     `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>&proceed=<proceedText>`
+//   - proceed == true, parameters, proceedURL non-empty
+//     → POST <Host><proceedURL> (the path Jenkins's wfapi advertises,
+//     typically `/job/.../wfapi/inputSubmit?inputId=<id>`)
+//   - proceed == true, parameters, proceedURL empty
+//     → POST /input/<id>/submit (legacy fallback)
 //
-// The `submit` wire format mirrors what the Jenkins classic UI sends.
+// The body in both parameterized cases is form-encoded:
+//
+//	Content-Type: application/x-www-form-urlencoded
+//	json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>&proceed=<proceedText>
+//
 // The `proceed=<proceedText>` field is REQUIRED — without it Jenkins
 // treats the submission as ambiguous and rejects it with "Rejected by
 // <user>", failing the build. proceedText is the `ok` label of the
 // input step (the same value surfaced as PendingInput.OK in the
 // schema), captured from /wfapi/pendingInputActions.
 //
-// Spike-validated against the deploy-input harness pipeline (build #7).
-func (c *Client) SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, proceedText string, parameters []InputParameterValue) error {
+// The wfapi/inputSubmit URL was identified as the only endpoint that
+// cleanly accepts parameterized submission during v0.2 dogfood;
+// `/input/<id>/submit` returns HTTP 200 but records "Rejected by
+// <user>" and aborts the build (confirmed against the deploy-input
+// harness pipeline build #19/#20).
+func (c *Client) SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, proceedText, proceedURL string, parameters []InputParameterValue) error {
 	if ref.BuildNumber == 0 {
 		return errors.New("jenkins: SubmitInput requires a Ref with a non-zero BuildNumber")
 	}
@@ -349,7 +360,7 @@ func (c *Client) SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID s
 	if proceedText == "" {
 		return errors.New("jenkins: SubmitInput requires a non-empty proceedText when parameters are supplied")
 	}
-	return c.postSubmitInput(ctx, ref, inputID, proceedText, parameters)
+	return c.postSubmitInput(ctx, ref, inputID, proceedText, proceedURL, parameters)
 }
 
 // postEmptyInput POSTs an empty body to /input/<id>/<action>. Used
@@ -372,13 +383,18 @@ func (c *Client) postEmptyInput(ctx context.Context, ref *jenkinsurl.Ref, inputI
 	return nil
 }
 
-// postSubmitInput POSTs the parameterized form-encoded body to
-// /input/<id>/submit. The inner JSON shape is fixed by Jenkins:
+// postSubmitInput POSTs the parameterized form-encoded body.
+// The inner JSON shape is fixed by Jenkins:
 // {"parameter":[{"name":..,"value":..}, ...]}. The `proceed` form
 // field carries the input step's `ok` label (proceedText) — Jenkins
 // rejects the submission ("Rejected by <user>") if it is missing or
 // does not match the declared label.
-func (c *Client) postSubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceedText string, parameters []InputParameterValue) error {
+//
+// When proceedURL is non-empty it is treated as a server-rooted path
+// (e.g. `/job/svc/42/wfapi/inputSubmit?inputId=Deploy`) and joined
+// with ref.Host. Otherwise the legacy `/input/<id>/submit` path is
+// used.
+func (c *Client) postSubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID, proceedText, proceedURL string, parameters []InputParameterValue) error {
 	type kv struct {
 		Name  string `json:"name"`
 		Value string `json:"value"`
@@ -399,7 +415,12 @@ func (c *Client) postSubmitInput(ctx context.Context, ref *jenkinsurl.Ref, input
 	form.Set("proceed", proceedText)
 	body := form.Encode()
 
-	endpoint := ref.APIPath("input/" + url.PathEscape(inputID) + "/submit")
+	var endpoint string
+	if proceedURL != "" {
+		endpoint = ref.Host + proceedURL
+	} else {
+		endpoint = ref.APIPath("input/" + url.PathEscape(inputID) + "/submit")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("jenkins: SubmitInput: build request: %w", err)

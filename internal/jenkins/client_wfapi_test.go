@@ -92,7 +92,7 @@ func Test_Client_SubmitInput_Proceed(t *testing.T) {
 	})
 
 	ref := mustParseRef(t, srv.URL+"/job/svc/42")
-	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", true, "", nil); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", true, "", "", nil); err != nil {
 		t.Errorf("SubmitInput(proceed): %v", err)
 	}
 }
@@ -108,18 +108,17 @@ func Test_Client_SubmitInput_Abort(t *testing.T) {
 	})
 
 	ref := mustParseRef(t, srv.URL+"/job/svc/42")
-	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", false, "", nil); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", false, "", "", nil); err != nil {
 		t.Errorf("SubmitInput(abort): %v", err)
 	}
 }
 
-// SubmitInput with parameters posts to /input/<id>/submit with
-// Content-Type: application/x-www-form-urlencoded and a body of
-// `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>&proceed=<proceedText>`.
-// This is the wire format Jenkins's classic input-submit endpoint
-// accepts (spike-validated against deploy-input harness pipeline).
-// The `proceed` field is the input step's `ok` label — without it
-// Jenkins records "Rejected by <user>" and aborts the build.
+// Fallback wire test: when proceedURL is empty, SubmitInput POSTs to
+// the legacy /input/<id>/submit endpoint. This path is kept for
+// older Jenkins servers whose wfapi pendingInputActions response
+// does not include `proceedUrl`; the v0.2 dogfood proved this
+// endpoint is broken on modern Jenkins (records "Rejected by
+// <user>") so production callers always pass the wfapi proceedURL.
 func Test_Client_SubmitInput_WithParameters_PostsFormJSON(t *testing.T) {
 	client, rec, srv := newClientAgainst(t)
 
@@ -140,7 +139,7 @@ func Test_Client_SubmitInput_WithParameters_PostsFormJSON(t *testing.T) {
 		{Name: "ENV", Value: "prod"},
 		{Name: "DRY_RUN", Value: "false"},
 	}
-	if err := client.SubmitInput(context.Background(), ref, "Deploy", true, "Deploy", params); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "Deploy", true, "Deploy", "", params); err != nil {
 		t.Fatalf("SubmitInput: %v", err)
 	}
 
@@ -183,6 +182,49 @@ func Test_Client_SubmitInput_WithParameters_PostsFormJSON(t *testing.T) {
 	}
 }
 
+// When proceedURL is non-empty, SubmitInput POSTs to <Host>+<proceedURL>
+// (the path Jenkins's wfapi pendingInputActions response advertises),
+// NOT the legacy /input/<id>/submit. The wfapi path is the only one
+// modern Jenkins accepts cleanly for parameterized input; the legacy
+// path returns HTTP 200 but records "Rejected by <user>".
+//
+// Confirmed against deploy-input harness pipeline build #20:
+// proceedUrl = "/job/deploy-input/20/wfapi/inputSubmit?inputId=Deploy".
+func Test_Client_SubmitInput_PrefersProceedURL(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+
+	var (
+		wfapiHit  bool
+		legacyHit bool
+		gotQuery  string
+	)
+	rec.handle("/job/svc/42/wfapi/inputSubmit", func(w http.ResponseWriter, r *http.Request) {
+		wfapiHit = true
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	})
+	rec.handle("/job/svc/42/input/Deploy/submit", func(w http.ResponseWriter, _ *http.Request) {
+		legacyHit = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	ref := mustParseRef(t, srv.URL+"/job/svc/42")
+	params := []jenkins.InputParameterValue{{Name: "ENV", Value: "prod"}}
+	proceedURL := "/job/svc/42/wfapi/inputSubmit?inputId=Deploy"
+	if err := client.SubmitInput(context.Background(), ref, "Deploy", true, "Deploy", proceedURL, params); err != nil {
+		t.Fatalf("SubmitInput: %v", err)
+	}
+	if !wfapiHit {
+		t.Error("expected wfapi/inputSubmit endpoint to be hit")
+	}
+	if legacyHit {
+		t.Error("legacy /input/<id>/submit MUST NOT be hit when proceedURL is supplied")
+	}
+	if gotQuery != "inputId=Deploy" {
+		t.Errorf("query=%q, want inputId=Deploy", gotQuery)
+	}
+}
+
 // Guard: submitting parameters without a proceedText is an error
 // caught BEFORE any HTTP call. Empty proceedText would cause Jenkins
 // to record "Rejected by <user>" silently (HTTP 200) and abort the
@@ -191,7 +233,7 @@ func Test_Client_SubmitInput_RequiresProceedTextWhenParameters(t *testing.T) {
 	client, _, srv := newClientAgainst(t)
 	ref := mustParseRef(t, srv.URL+"/job/svc/42")
 	params := []jenkins.InputParameterValue{{Name: "ENV", Value: "prod"}}
-	err := client.SubmitInput(context.Background(), ref, "Deploy", true, "", params)
+	err := client.SubmitInput(context.Background(), ref, "Deploy", true, "", "", params)
 	if err == nil {
 		t.Fatal("expected error when proceedText is empty with parameters, got nil")
 	}
@@ -214,7 +256,7 @@ func Test_Client_SubmitInput_AbortIgnoresParameters(t *testing.T) {
 
 	ref := mustParseRef(t, srv.URL+"/job/svc/42")
 	params := []jenkins.InputParameterValue{{Name: "ENV", Value: "prod"}}
-	if err := client.SubmitInput(context.Background(), ref, "Deploy", false, "", params); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "Deploy", false, "", "", params); err != nil {
 		t.Fatalf("SubmitInput(abort): %v", err)
 	}
 	if !abortHit {
