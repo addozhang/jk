@@ -190,16 +190,17 @@ func Test_MapBuildStatus_ProgressZeroWhenEstimateMissing(t *testing.T) {
 }
 
 // Pending-input detection: when Jenkins reports an in-progress build
-// with a pendingInputAction in `actions`, State must be PENDING_INPUT
-// (NOT plain RUNNING) and PendingInput populated. Per docs/schema.md
-// §3.7 and §4: "Paused at a Pipeline `input` step awaiting `jk build
-// input`".
+// with an InputAction marker in `actions`, State must be PENDING_INPUT
+// (NOT plain RUNNING). Per docs/schema.md §3.7 and §4: "Paused at a
+// Pipeline `input` step awaiting `jk build input`".
 //
-// The action shape mirrors what core surfaces in api/json under
-// `actions[]` for input-paused builds. The dedicated wfapi
-// pendingInputActions endpoint is mapped by 12.6 separately; this
-// test only exercises the state-derivation path.
-func Test_MapBuildStatus_PendingInputState(t *testing.T) {
+// Realistic fixture: core /api/json exposes the InputAction with only
+// the `_class` discriminator — the id/message/ok/parameters fields are
+// not populated there. They live on /wfapi/pendingInputActions and are
+// mapped separately by MapPendingInput. So this mapper only emits the
+// state derivation and leaves PendingInput nil for the CLI layer to
+// enrich. (See openspec change add-input-parameter-submission §6.)
+func Test_MapBuildStatus_PendingInputMarkerOnly(t *testing.T) {
 	raw := []byte(`{
 		"number":9,
 		"url":"http://x/9/",
@@ -209,11 +210,7 @@ func Test_MapBuildStatus_PendingInputState(t *testing.T) {
 		"duration":1000,
 		"estimatedDuration":60000,
 		"actions":[
-			{"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction",
-			 "id":"Proceed",
-			 "message":"Deploy to prod?",
-			 "ok":"Deploy",
-			 "parameters":[]}
+			{"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction"}
 		]
 	}`)
 
@@ -224,21 +221,86 @@ func Test_MapBuildStatus_PendingInputState(t *testing.T) {
 	if got.State != schema.BuildStatePendingInput {
 		t.Errorf("State=%q, want PENDING_INPUT", got.State)
 	}
-	if got.PendingInput == nil {
-		t.Fatal("PendingInput=nil, want populated")
+	// PendingInput is left nil here — populating it requires a
+	// /wfapi/pendingInputActions fetch, which lives in the CLI layer.
+	if got.PendingInput != nil {
+		t.Errorf("PendingInput=%+v, want nil (mapper does not enrich from wfapi)", got.PendingInput)
 	}
-	if got.PendingInput.ID != "Proceed" {
-		t.Errorf("PendingInput.ID=%q, want Proceed", got.PendingInput.ID)
+}
+
+// Regression for the v0.1 state-derivation bug: a finished build whose
+// historical InputAction marker is still in actions[] must report DONE,
+// not PENDING_INPUT. Per openspec change add-input-parameter-submission
+// Decision 7: building==false short-circuits state derivation.
+func Test_MapBuildStatus_DoneWinsOverInputMarker(t *testing.T) {
+	raw := []byte(`{
+		"number":9,
+		"url":"http://x/9/",
+		"result":"SUCCESS",
+		"building":false,
+		"timestamp":1700000000000,
+		"duration":65000,
+		"estimatedDuration":60000,
+		"actions":[
+			{"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction"}
+		]
+	}`)
+
+	got, err := schema.MapBuildStatus(raw)
+	if err != nil {
+		t.Fatalf("MapBuildStatus: %v", err)
 	}
-	if got.PendingInput.Message != "Deploy to prod?" {
-		t.Errorf("PendingInput.Message=%q", got.PendingInput.Message)
+	if got.State != schema.BuildStateDone {
+		t.Errorf("State=%q, want DONE (building==false wins over stale InputAction marker)", got.State)
 	}
-	if got.PendingInput.OK != "Deploy" {
-		t.Errorf("PendingInput.OK=%q, want Deploy", got.PendingInput.OK)
+	if got.Result == nil || *got.Result != schema.BuildResultSuccess {
+		t.Errorf("Result=%v, want *SUCCESS", got.Result)
 	}
-	// Empty array, not nil — matches schema contract "Parameter[]".
-	if got.PendingInput.Parameters == nil {
-		t.Error("PendingInput.Parameters=nil, want [] (non-nil empty slice)")
+	if got.PendingInput != nil {
+		t.Errorf("PendingInput=%+v, want nil for finished build", got.PendingInput)
+	}
+}
+
+// HasPendingInputMarker exposes the actions[] presence-bit so the CLI
+// layer can decide whether to make the wfapi enrichment call without
+// re-parsing the core JSON.
+func Test_HasPendingInputMarker(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{
+			name: "marker present",
+			raw:  `{"actions":[{"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction"}]}`,
+			want: true,
+		},
+		{
+			name: "no actions",
+			raw:  `{"actions":[]}`,
+			want: false,
+		},
+		{
+			name: "other actions only",
+			raw:  `{"actions":[{"_class":"hudson.model.CauseAction"},{}]}`,
+			want: false,
+		},
+		{
+			name: "actions field absent",
+			raw:  `{"number":1}`,
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := schema.HasPendingInputMarker([]byte(c.raw))
+			if err != nil {
+				t.Fatalf("HasPendingInputMarker: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("got=%v, want=%v", got, c.want)
+			}
+		})
 	}
 }
 

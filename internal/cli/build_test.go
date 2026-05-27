@@ -288,16 +288,26 @@ func Test_BuildTrigger_Watch_PendingInput_ExitCode4(t *testing.T) {
 		}).
 		handle("/job/svc/2/api/json", func(w http.ResponseWriter, r *http.Request) {
 			// Always paused on input. The InputAction class triggers
-			// MapBuildStatus to mark State=PENDING_INPUT.
+			// MapBuildStatus to mark State=PENDING_INPUT. Per the
+			// realistic core shape (see openspec change
+			// add-input-parameter-submission §6), core /api/json
+			// only carries the _class marker — id/message/parameters
+			// live on wfapi/pendingInputActions below.
 			fmt.Fprintf(w, `{
 				"number":2,"url":"http://%s/job/svc/2/",
 				"building":true,"result":null,"duration":0,"estimatedDuration":-1,
 				"actions":[{
-					"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction",
-					"id":"Deploy-Approval","message":"Deploy to prod?","ok":"Proceed",
-					"parameters":[]
+					"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction"
 				}]
 			}`, r.Host)
+		}).
+		handle("/job/svc/2/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{
+				"id":"Deploy-Approval",
+				"proceedText":"Proceed",
+				"message":"Deploy to prod?",
+				"inputs":[]
+			}]`)
 		}).
 		server()
 	defer srv.Close()
@@ -389,6 +399,182 @@ func Test_BuildStatus_MissingBuildNumber(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "build number") {
 		t.Errorf("error must mention build number: %v", err)
+	}
+}
+
+// Scenario from openspec change add-input-parameter-submission §6,
+// scenario "Live paused build populates pendingInput from wfapi":
+// when core /api/json reports building==true with an InputAction
+// marker but no id/message/parameters fields (the realistic shape),
+// the status command MUST additionally call
+// /<n>/wfapi/pendingInputActions and populate the pendingInput block
+// from that response.
+func Test_BuildStatus_LivePausedEnrichesFromWfapi(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/5/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":5,"url":"http://example/job/svc/5/",
+				"building":true,"result":null,
+				"timestamp":1700000000000,
+				"duration":1000,"estimatedDuration":60000,
+				"actions":[
+					{"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction"}
+				]
+			}`)
+		}).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{
+				"id":"Deploy",
+				"proceedText":"Deploy",
+				"message":"Deploy to which environment?",
+				"inputs":[
+					{"_class":"hudson.model.ChoiceParameterDefinition",
+					 "name":"ENV","type":"ChoiceParameterDefinition",
+					 "choices":["staging","prod"],
+					 "defaultParameterValue":{"value":"staging"}},
+					{"_class":"hudson.model.BooleanParameterDefinition",
+					 "name":"DRY_RUN","type":"BooleanParameterDefinition",
+					 "defaultParameterValue":{"value":true}}
+				]
+			}]`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "status", srv.URL + "/job/svc/5/"})
+	if err != nil {
+		t.Fatalf("build status: %v", err)
+	}
+	for _, want := range []string{
+		"state: PENDING_INPUT",
+		"id: Deploy",
+		"message: Deploy to which environment?",
+		"name: ENV",
+		"name: DRY_RUN",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// Scenario "Finished build with historical InputAction reports DONE":
+// a build that has already completed must report state==DONE even
+// when actions[] still carries the historical InputAction marker, and
+// MUST NOT make the secondary wfapi call. The newMux catch-all
+// t.Errorf's on any unhandled path, so registering only the /api/json
+// handler is sufficient to assert "wfapi was not called."
+func Test_BuildStatus_FinishedBuildDoesNotEnrich(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/5/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":5,"url":"http://example/job/svc/5/",
+				"building":false,"result":"SUCCESS",
+				"timestamp":1700000000000,
+				"duration":65000,"estimatedDuration":60000,
+				"actions":[
+					{"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction"}
+				]
+			}`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "status", srv.URL + "/job/svc/5/"})
+	if err != nil {
+		t.Fatalf("build status: %v", err)
+	}
+	for _, want := range []string{
+		"state: DONE",
+		"result: SUCCESS",
+		"progressPercent: 100",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, stdout)
+		}
+	}
+	// PENDING_INPUT must not leak in even though the historical
+	// marker is in actions[].
+	if strings.Contains(stdout, "PENDING_INPUT") {
+		t.Errorf("finished build must not report PENDING_INPUT:\n%s", stdout)
+	}
+}
+
+// Scenario "wfapi enrichment failure degrades gracefully": if the
+// secondary /wfapi/pendingInputActions call returns HTTP 500, the
+// status command MUST NOT fail. It logs to stderr under --debug,
+// omits the pendingInput block, and falls back to state=RUNNING.
+func Test_BuildStatus_WfapiEnrichmentFailureDegradesGracefully(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/5/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":5,"url":"http://example/job/svc/5/",
+				"building":true,"result":null,
+				"timestamp":1700000000000,
+				"duration":1000,"estimatedDuration":60000,
+				"actions":[
+					{"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction"}
+				]
+			}`)
+		}).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, stderr, err := runJK(t, []string{
+		"--debug",
+		"build", "status", srv.URL + "/job/svc/5/",
+	})
+	if err != nil {
+		t.Fatalf("build status: %v (want exit 0 on enrichment failure)", err)
+	}
+	if !strings.Contains(stdout, "state: RUNNING") {
+		t.Errorf("expected state: RUNNING fallback, got:\n%s", stdout)
+	}
+	// pendingInput.id should be empty / the block should serialize
+	// to null. Easier to assert: PENDING_INPUT must NOT appear.
+	if strings.Contains(stdout, "PENDING_INPUT") {
+		t.Errorf("must not report PENDING_INPUT when enrichment failed:\n%s", stdout)
+	}
+	// Under --debug we surface a log line about the failure.
+	if !strings.Contains(stderr, "pendingInputActions") {
+		t.Errorf("--debug stderr must mention the wfapi enrichment failure:\n%s", stderr)
+	}
+}
+
+// Scenario "Race — input submitted between the two HTTP calls": the
+// marker is in actions[] but wfapi returns []. The command MUST fall
+// back to state=RUNNING and omit pendingInput, exit 0.
+func Test_BuildStatus_InputSubmittedRaceReturnsRunning(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/5/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":5,"url":"http://example/job/svc/5/",
+				"building":true,"result":null,
+				"timestamp":1700000000000,
+				"duration":1000,"estimatedDuration":60000,
+				"actions":[
+					{"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction"}
+				]
+			}`)
+		}).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[]`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "status", srv.URL + "/job/svc/5/"})
+	if err != nil {
+		t.Fatalf("build status: %v", err)
+	}
+	if !strings.Contains(stdout, "state: RUNNING") {
+		t.Errorf("expected state: RUNNING on race condition, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "PENDING_INPUT") {
+		t.Errorf("must not report PENDING_INPUT when wfapi returns []:\n%s", stdout)
 	}
 }
 

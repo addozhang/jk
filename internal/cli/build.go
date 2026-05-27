@@ -253,7 +253,62 @@ func runBuildStatus(cmd *cobra.Command, flags *GlobalFlags, rawURL string) error
 	if err != nil {
 		return jkerrors.NewMalformedResponse(ref.Host, err)
 	}
+
+	// Enrich PENDING_INPUT state from wfapi when the build is still
+	// live. Per openspec change add-input-parameter-submission §6:
+	// Jenkins core /api/json only carries the InputAction _class
+	// marker; the populated id/message/parameters live on
+	// /wfapi/pendingInputActions. We only call wfapi when the build
+	// is building AND the marker is present, and we degrade
+	// gracefully when wfapi is unavailable (RUNNING + no
+	// pendingInput, never fail the whole status call).
+	if status.State == schema.BuildStatePendingInput {
+		hasMarker, markerErr := schema.HasPendingInputMarker(body)
+		if markerErr != nil {
+			// Cannot happen — MapBuildStatus already consumed the
+			// same bytes. Fall through defensively.
+			hasMarker = true
+		}
+		if hasMarker && status.Building {
+			enriched, enrichErr := enrichPendingInput(ctx, cc, ref)
+			switch {
+			case enrichErr != nil:
+				if flags.Debug {
+					//nolint:errcheck // best-effort debug log to stderr
+					fmt.Fprintf(cc.stderr, "jk debug: wfapi pendingInputActions enrichment failed for %s: %v\n", rawURL, enrichErr)
+				}
+				// Downgrade to RUNNING and emit no pendingInput
+				// block. We do NOT fail the status call: a
+				// missing wfapi response shouldn't black out the
+				// whole status read.
+				status.State = schema.BuildStateRunning
+				status.PendingInput = nil
+			case enriched == nil:
+				// Race: marker was present in /api/json but the
+				// input was submitted before our wfapi call.
+				// Downgrade to RUNNING.
+				status.State = schema.BuildStateRunning
+				status.PendingInput = nil
+			default:
+				status.PendingInput = enriched
+			}
+		}
+	}
+
 	return cc.render(status)
+}
+
+// enrichPendingInput fetches /<n>/wfapi/pendingInputActions and
+// returns the first decoded entry, or nil if the array is empty
+// (race: input was submitted between the two HTTP calls). Errors are
+// returned to the caller, which decides whether to degrade or
+// propagate.
+func enrichPendingInput(ctx context.Context, cc *commandContext, ref *jenkinsurl.Ref) (*schema.PendingInput, error) {
+	raw, err := cc.client.GetPendingInputs(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return schema.MapPendingInput(raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -691,6 +746,20 @@ func watchBuild(ctx context.Context, cc *commandContext, buildRef *jenkinsurl.Re
 		status, err := schema.MapBuildStatus(body)
 		if err != nil {
 			return jkerrors.NewMalformedResponse(buildRef.Host, err)
+		}
+		// When the mapper reports PENDING_INPUT, enrich from wfapi
+		// so the user-facing line below can show the input id and
+		// message. The mapper only carries the marker presence-bit;
+		// see runBuildStatus for the rationale. On enrichment
+		// failure (or race), fall back to a generic notice rather
+		// than failing the whole watch.
+		if status.State == schema.BuildStatePendingInput && status.Building {
+			enrichCtx, enrichCancel := context.WithTimeout(ctx, timeout)
+			enriched, eerr := enrichPendingInput(enrichCtx, cc, buildRef)
+			enrichCancel()
+			if eerr == nil && enriched != nil {
+				status.PendingInput = enriched
+			}
 		}
 		//nolint:errcheck // best-effort progress write to stderr
 		fmt.Fprintf(cc.stderr, "build %s: state=%s progress=%d%%\n",
