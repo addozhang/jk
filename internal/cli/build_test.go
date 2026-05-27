@@ -1147,6 +1147,62 @@ func Test_BuildInput_BooleanParsing(t *testing.T) {
 	}
 }
 
+// 3.10 When wfapi advertises `proceedUrl` for the pending input,
+// `jk build input proceed -p …` MUST POST to that path (typically
+// /wfapi/inputSubmit?inputId=<id>) and NOT to the legacy
+// /input/<id>/submit. Confirmed against deploy-input harness build
+// #20: the legacy path silently records "Rejected by <user>" and
+// aborts the build, while wfapi/inputSubmit succeeds.
+func Test_BuildInput_UsesWfapiProceedURL(t *testing.T) {
+	const pending = `[{
+		"id":"Deploy","proceedText":"Deploy","message":"Pick env",
+		"proceedUrl":"/job/svc/5/wfapi/inputSubmit?inputId=Deploy",
+		"inputs":[
+			{"type":"ChoiceParameterDefinition","name":"ENV",
+			 "definition":{"defaultVal":"staging","choices":["staging","prod"]}}
+		]
+	}]`
+
+	var (
+		wfapiHit  bool
+		legacyHit bool
+		got       map[string]string
+	)
+	srv := newMux(t).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, pending)
+		}).
+		handle("/job/svc/5/wfapi/inputSubmit", func(w http.ResponseWriter, r *http.Request) {
+			wfapiHit = true
+			got = decodeSubmitForm(t, r)
+			if q := r.URL.Query().Get("inputId"); q != "Deploy" {
+				t.Errorf("inputId query=%q, want Deploy", q)
+			}
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/5/input/Deploy/submit", func(w http.ResponseWriter, _ *http.Request) {
+			legacyHit = true
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/5/api/json", stubBuildStatus).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "proceed", "-p", "ENV=prod"})
+	if err != nil {
+		t.Fatalf("build input: %v", err)
+	}
+	if !wfapiHit {
+		t.Error("expected wfapi/inputSubmit to be hit")
+	}
+	if legacyHit {
+		t.Error("legacy /input/<id>/submit MUST NOT be hit when wfapi proceedUrl is advertised")
+	}
+	if got["ENV"] != "prod" {
+		t.Errorf("submitted ENV=%q, want prod (full=%v)", got["ENV"], got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 14.6 build logs
 // ---------------------------------------------------------------------------
