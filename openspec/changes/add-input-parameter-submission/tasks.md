@@ -28,9 +28,9 @@
 
 ## 4. End-to-End Test
 
-- [ ] 4.1 In `test/e2e/build_e2e_test.go`, remove the comment at lines 9–13 that excludes `input` from the e2e set (or scope it down to just `--watch`).
-- [ ] 4.2 Add `Test_E2E_BuildInput_SubmitParameterizedInput` that uses the `deploy-input` pipeline already seeded in the harness (added 2026-05-26). Trigger it, poll until `pendingInput` appears, run `jk build input <url> proceed -p ENV=prod -p DRY_RUN=false`, then poll until `result == SUCCESS`. Assert the final build log contains evidence that `ENV=prod` was the choice that ran (e.g. echo line).
-- [ ] 4.3 Add a small smoke test `Test_E2E_BuildInput_InvalidChoice_ExitsLocally` that runs `jk build input <url> proceed -p ENV=devvv` against the same pending input and asserts exit code 10 without the build progressing past `Approval`. Abort the lingering build at the end.
+- [x] 4.1 In `test/e2e/build_e2e_test.go`, remove the comment at lines 9–13 that excludes `input` from the e2e set (or scope it down to just `--watch`).
+- [x] 4.2 Add `Test_E2E_BuildInput_SubmitParameterizedInput` that uses the `deploy-input` pipeline already seeded in the harness (added 2026-05-26). Trigger it, poll until `pendingInput` appears, run `jk build input <url> proceed -p ENV=prod -p DRY_RUN=false`, then poll until `result == SUCCESS`. Assert the final build log contains evidence that `ENV=prod` was the choice that ran (e.g. echo line).
+- [x] 4.3 Add a small smoke test `Test_E2E_BuildInput_InvalidChoice_ExitsLocally` that runs `jk build input <url> proceed -p ENV=devvv` against the same pending input and asserts exit code 10 without the build progressing past `Approval`. Abort the lingering build at the end.
 
 ## 5. Status Read-Path Fixes (Decisions 6 and 7)
 

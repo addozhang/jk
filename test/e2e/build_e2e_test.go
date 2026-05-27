@@ -6,11 +6,11 @@ package e2e
 // build history seeded by setupHarness (which triggers one build of
 // each seeded pipeline and waits for completion).
 //
-// We deliberately do NOT cover `build trigger`, `--watch`, or `input`
-// in this first iteration: those depend on the wfapi-input + queue
-// resolution shapes still being validated against a real Jenkins
-// (spike tasks 1.2 / 1.3). Adding them here would couple the harness
-// to assumptions that may shift.
+// `build input` is covered separately in build_input_e2e_test.go since
+// it needs to drive a paused-then-resumed build lifecycle that does not
+// fit setupHarness's "trigger and wait for completion" model. We still
+// do NOT cover `build trigger` or `--watch` here: those depend on
+// resolution shapes still being validated against a real Jenkins.
 
 import (
 	"strings"
