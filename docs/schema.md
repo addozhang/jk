@@ -175,15 +175,22 @@ Returns the current state of a build.
 | `durationMs` | `integer` | `stable` | Elapsed time so far for running builds; final duration for completed builds. |
 | `estimatedDurationMs` | `integer \| null` | `stable` | Jenkins's estimate from historical runs; `null` if unavailable. |
 | `progressPercent` | `integer` | `stable` | `0`–`100`. Computed as `min(100, 100 * durationMs / estimatedDurationMs)`; equals `100` once `state == DONE`. |
-| `pendingInput` | `PendingInput \| null` | `experimental` | Non-null iff `state == PENDING_INPUT`. Shape pending spike 1.2. |
+| `pendingInput` | `PendingInput \| null` | `experimental` | Non-null iff `state == PENDING_INPUT`. Populated from `/wfapi/pendingInputActions` (not from core `actions[]`, which only carries an `_class` marker). |
 
 ```yaml
 PendingInput:
   id: string                       # experimental
   message: string                  # experimental
-  ok: string                       # experimental — label of the "proceed" button
+  ok: string                       # experimental — label of the "proceed" button; also the value of the `proceed` form field that `jk build input` sends to Jenkins's /input/<id>/submit
   parameters: Parameter[]          # stable — input-step parameters (reuses §3.4 shape); consumed by `jk build input -p` validation
 ```
+
+`state` is derived in the following order — the first matching rule wins:
+
+1. `building == false` → `DONE` (a finished build is never `PENDING_INPUT`, even if a stale input-action marker is still attached to `actions[]`).
+2. The core `actions[]` array carries a `pendingInput` marker AND `/wfapi/pendingInputActions` returns at least one entry → `PENDING_INPUT`, and `pendingInput` is populated from the wfapi response.
+3. The core marker is present but wfapi returns an empty list (input was submitted between the two HTTP calls, or enrichment failed) → `RUNNING`, `pendingInput` omitted.
+4. Otherwise → `RUNNING`.
 
 ### 3.8 `jk build stages <url>`
 
@@ -209,7 +216,28 @@ This entire section is `experimental` until the wfapi spike (tasks 1.1, 1.3) con
 
 ### 3.9 `jk build input <url> proceed|abort`
 
-Returns confirmation that the input was submitted.
+Submits a `proceed` or `abort` response to a paused Pipeline input step. When the build has exactly one pending input, the command operates on that input by default; when two or more are pending, `--input-id <id>` is required.
+
+Pass input-step parameters with repeatable `-p KEY=VALUE` flags. Use `@PATH` to load a value from a file (the file is read verbatim, including trailing newlines). Values are validated client-side against the pending input's declared parameter shape (see §3.7 `PendingInput.parameters`) **before** any HTTP request reaches Jenkins:
+
+- `CHOICE`: value must appear in the declared `choices` list.
+- `BOOLEAN`: accepted as case-insensitive `true` / `false` / `1` / `0`; normalized to lowercase `true` / `false` on the wire.
+- `STRING` / `TEXT` / `PASSWORD` / `UNKNOWN`: any string.
+
+Unknown keys, invalid choices, or required parameters with no value (and no `defaultValue` in the declaration) exit with code `10` and the message names the offending parameter. `-p` is ignored — with a single stderr warning — when the action is `abort`.
+
+The endpoint and wire format are chosen by the action and parameter set:
+
+| Action  | Parameters supplied         | Endpoint                       | Body                                                                          |
+|---------|------------------------------|--------------------------------|--------------------------------------------------------------------------------|
+| `proceed` | none, none declared        | `POST /input/<id>/proceedEmpty` | empty                                                                          |
+| `proceed` | declared, all defaulted    | `POST /input/<id>/submit`       | `json=<URL-encoded JSON>&proceed=<ok-label>`                                  |
+| `proceed` | any supplied               | `POST /input/<id>/submit`       | `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>&proceed=<ok-label>` |
+| `abort`   | (ignored)                  | `POST /input/<id>/abort`        | empty                                                                          |
+
+The `proceed=<ok-label>` form field is **required** by Jenkins on `/submit` — without it Jenkins returns `HTTP 200` but records `Rejected by <user>` in the build log and aborts the run. The label is sourced from the pending input's `ok` field (§3.7 `PendingInput.ok`) and threaded through automatically; users do not need to supply it.
+
+Returns confirmation that the input was submitted:
 
 | Field | Type | Tier | Description |
 |---|---|---|---|

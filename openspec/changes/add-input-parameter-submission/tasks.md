@@ -45,10 +45,10 @@
 
 ## 6. Docs
 
-- [ ] 6.1 Update `internal/cli/build.go` `newBuildInputCommand` long help text: document `-p KEY=VALUE`, the validation rules, and link to `docs/schema.md §3.9`.
-- [ ] 6.2 Update `docs/schema.md §3.9` to (a) mark `pendingInput.parameters` as `stable`, (b) describe the new `submit` vs `proceedEmpty` rule, (c) document the `-p` flag, (d) clarify that `pendingInput` is populated from `/wfapi/pendingInputActions` (not core `actions[]`), and (e) document the corrected state-derivation order.
-- [ ] 6.3 Add a `README.md` example under the existing input section: `jk build input http://jenkins.example.com/job/deploy/42/ proceed -p ENV=prod -p DRY_RUN=false`.
-- [ ] 6.4 Update `CHANGELOG.md` (or `README.md` "Release notes" section) for v0.2.0 with two sections: **New features** (parameterized input submission, `pendingInput.parameters` promoted to stable) and **Behavior changes (bug fixes)** (finished builds no longer report `state: PENDING_INPUT`; live paused builds now populate `pendingInput.id`/`message`/`parameters` correctly).
+- [x] 6.1 Update `internal/cli/build.go` `newBuildInputCommand` long help text: document `-p KEY=VALUE`, the validation rules, and link to `docs/schema.md §3.9`.
+- [x] 6.2 Update `docs/schema.md §3.9` to (a) mark `pendingInput.parameters` as `stable`, (b) describe the new `submit` vs `proceedEmpty` rule, (c) document the `-p` flag, (d) clarify that `pendingInput` is populated from `/wfapi/pendingInputActions` (not core `actions[]`), and (e) document the corrected state-derivation order.
+- [x] 6.3 Add a `README.md` example under the existing input section: `jk build input http://jenkins.example.com/job/deploy/42/ proceed -p ENV=prod -p DRY_RUN=false`.
+- [x] 6.4 Update `CHANGELOG.md` (or `README.md` "Release notes" section) for v0.2.0 with two sections: **New features** (parameterized input submission, `pendingInput.parameters` promoted to stable) and **Behavior changes (bug fixes)** (finished builds no longer report `state: PENDING_INPUT`; live paused builds now populate `pendingInput.id`/`message`/`parameters` correctly).
 
 ## 7. Validation and Release
 
