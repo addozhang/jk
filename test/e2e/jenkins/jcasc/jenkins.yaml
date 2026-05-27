@@ -81,3 +81,12 @@ jobs:
           }
         }
       }
+  - script: |
+      pipelineJob('deploy-input') {
+        definition {
+          cps {
+            script(new File('/var/jenkins_home/pipelines/deploy-input.Jenkinsfile').text)
+            sandbox(true)
+          }
+        }
+      }
