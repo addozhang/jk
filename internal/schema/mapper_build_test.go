@@ -577,9 +577,9 @@ func Test_MapPendingInput_Single(t *testing.T) {
 	}
 }
 
-// Pending input carrying parameters (rare but documented). Asserts
-// the parameter shape mirrors §3.4 Parameter (Name/Type/Default/
-// Description/Choices) so consumers can reuse the same renderer.
+// STRING parameter via wfapi shape (defaultVal under definition,
+// no description). Complements Test_MapPendingInput_RealWfapiShape
+// which covers CHOICE + BOOLEAN.
 func Test_MapPendingInput_WithParameters(t *testing.T) {
 	raw := []byte(`[
 		{
@@ -587,12 +587,74 @@ func Test_MapPendingInput_WithParameters(t *testing.T) {
 			"proceedText":"Release",
 			"message":"Pick version",
 			"inputs":[
-				{"_class":"hudson.model.ChoiceParameterDefinition",
-				 "name":"version","type":"ChoiceParameterDefinition",
-				 "choices":["v1","v2"]},
-				{"_class":"hudson.model.StringParameterDefinition",
-				 "name":"notes","type":"StringParameterDefinition",
-				 "defaultParameterValue":{"value":"no notes"}}
+				{
+					"type":"StringParameterDefinition",
+					"name":"notes",
+					"definition":{"defaultVal":"no notes"}
+				}
+			]
+		}
+	]`)
+
+	got, err := schema.MapPendingInput(raw)
+	if err != nil {
+		t.Fatalf("MapPendingInput: %v", err)
+	}
+	if got == nil {
+		t.Fatal("got=nil")
+	}
+	if len(got.Parameters) != 1 {
+		t.Fatalf("len(Parameters)=%d, want 1", len(got.Parameters))
+	}
+	if got.Parameters[0].Type != schema.ParameterTypeString {
+		t.Errorf("Parameters[0].Type=%q, want STRING", got.Parameters[0].Type)
+	}
+	if got.Parameters[0].Default != "no notes" {
+		t.Errorf("Parameters[0].Default=%v, want \"no notes\"", got.Parameters[0].Default)
+	}
+	if got.Parameters[0].Description != nil {
+		t.Errorf("Parameters[0].Description=%v, want nil", got.Parameters[0].Description)
+	}
+}
+
+// Real wfapi pendingInputActions response shape (captured from a live
+// Jenkins instance running the deploy-input harness pipeline). Unlike
+// the /api/json `parameterDefinitions` shape, wfapi wraps choices and
+// defaults inside a nested `definition` object and uses the field name
+// `defaultVal` instead of `defaultParameterValue.value`. Also note
+// there is no `_class` field — only `type` (simple class name).
+//
+// Asserts that:
+//   - CHOICE params populate `Choices`,
+//   - BOOLEAN params populate `Default` (true/false),
+//   - `Description` flows from the top-level `description` field.
+//
+// This is the shape the client-side `-p` validator in
+// `add-input-parameter-submission` will consume.
+func Test_MapPendingInput_RealWfapiShape(t *testing.T) {
+	raw := []byte(`[
+		{
+			"id":"Deploy",
+			"proceedText":"Deploy",
+			"message":"Deploy to which environment?",
+			"inputs":[
+				{
+					"type":"ChoiceParameterDefinition",
+					"name":"ENV",
+					"description":"Target environment",
+					"definition":{
+						"defaultVal":"staging",
+						"choices":["staging","prod"]
+					}
+				},
+				{
+					"type":"BooleanParameterDefinition",
+					"name":"DRY_RUN",
+					"description":"Skip side effects",
+					"definition":{
+						"defaultVal":true
+					}
+				}
 			]
 		}
 	]`)
@@ -607,17 +669,30 @@ func Test_MapPendingInput_WithParameters(t *testing.T) {
 	if len(got.Parameters) != 2 {
 		t.Fatalf("len(Parameters)=%d, want 2", len(got.Parameters))
 	}
-	if got.Parameters[0].Type != schema.ParameterTypeChoice {
-		t.Errorf("Parameters[0].Type=%q, want CHOICE", got.Parameters[0].Type)
+
+	env := got.Parameters[0]
+	if env.Name != "ENV" || env.Type != schema.ParameterTypeChoice {
+		t.Errorf("ENV: name=%q type=%q, want ENV/CHOICE", env.Name, env.Type)
 	}
-	if len(got.Parameters[0].Choices) != 2 {
-		t.Errorf("Parameters[0].Choices=%v, want [v1 v2]", got.Parameters[0].Choices)
+	if env.Description == nil || *env.Description != "Target environment" {
+		t.Errorf("ENV.Description=%v, want \"Target environment\"", env.Description)
 	}
-	if got.Parameters[1].Type != schema.ParameterTypeString {
-		t.Errorf("Parameters[1].Type=%q, want STRING", got.Parameters[1].Type)
+	if len(env.Choices) != 2 || env.Choices[0] != "staging" || env.Choices[1] != "prod" {
+		t.Errorf("ENV.Choices=%v, want [staging prod]", env.Choices)
 	}
-	if got.Parameters[1].Default != "no notes" {
-		t.Errorf("Parameters[1].Default=%v, want \"no notes\"", got.Parameters[1].Default)
+	if env.Default != "staging" {
+		t.Errorf("ENV.Default=%v, want \"staging\"", env.Default)
+	}
+
+	dry := got.Parameters[1]
+	if dry.Name != "DRY_RUN" || dry.Type != schema.ParameterTypeBoolean {
+		t.Errorf("DRY_RUN: name=%q type=%q, want DRY_RUN/BOOLEAN", dry.Name, dry.Type)
+	}
+	if dry.Default != true {
+		t.Errorf("DRY_RUN.Default=%v (%T), want true (bool)", dry.Default, dry.Default)
+	}
+	if len(dry.Choices) != 0 {
+		t.Errorf("DRY_RUN.Choices=%v, want nil/empty for BOOLEAN", dry.Choices)
 	}
 }
 

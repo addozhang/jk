@@ -270,18 +270,23 @@ func normalizeStageStatus(s string) StageStatus {
 // are pending; this lets callers emit `pendingInput: null` without
 // wrapping in an error path.
 //
-// The wfapi shape uses `proceedText` rather than `ok`; we translate
-// to the schema field name. Parameter definitions live under
-// `inputs[]` and reuse the same shape as §3.4 parameter definitions.
+// The wfapi shape differs from /api/json `parameterDefinitions`:
+//   - top-level uses `proceedText` rather than `ok`,
+//   - each input has `type` (simple class) but no `_class`,
+//   - defaults and choices live under a nested `definition` object,
+//     with the field name `defaultVal` (not `defaultParameterValue`).
 //
-// Stability: experimental — pending spike 1.2 confirmation of the
-// real endpoint shape.
+// This was captured from a live Jenkins instance running the
+// deploy-input harness pipeline; see
+// Test_MapPendingInput_RealWfapiShape for the reference fixture.
+//
+// Stability: stable (consumed by `jk build input -p` validation).
 func MapPendingInput(raw []byte) (*PendingInput, error) {
 	var src []struct {
-		ID          string                   `json:"id"`
-		ProceedText string                   `json:"proceedText"`
-		Message     string                   `json:"message"`
-		Inputs      []rawParameterDefinition `json:"inputs"`
+		ID          string               `json:"id"`
+		ProceedText string               `json:"proceedText"`
+		Message     string               `json:"message"`
+		Inputs      []rawWfapiInputParam `json:"inputs"`
 	}
 	if err := json.Unmarshal(raw, &src); err != nil {
 		return nil, fmt.Errorf("MapPendingInput: %w", err)
@@ -300,4 +305,37 @@ func MapPendingInput(raw []byte) (*PendingInput, error) {
 		OK:         first.ProceedText,
 		Parameters: params,
 	}, nil
+}
+
+// rawWfapiInputParam mirrors the shape Jenkins returns under
+// `/wfapi/pendingInputActions[].inputs[]`. Unlike rawParameterDefinition
+// (which mirrors /api/json `parameterDefinitions`), wfapi nests the
+// default value and choices inside a `definition` object.
+type rawWfapiInputParam struct {
+	Type        string  `json:"type"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	Definition  *struct {
+		DefaultVal any      `json:"defaultVal"`
+		Choices    []string `json:"choices"`
+	} `json:"definition"`
+}
+
+func (d rawWfapiInputParam) toSchema() Parameter {
+	p := Parameter{
+		Name:        d.Name,
+		Type:        classifyParameterType(d.Type, ""),
+		Description: d.Description,
+	}
+	if d.Definition != nil {
+		if d.Definition.DefaultVal != nil {
+			p.Default = d.Definition.DefaultVal
+		}
+		// Choices only meaningful for CHOICE; leave nil for everything
+		// else so JSON renders as `null` rather than `[]`.
+		if p.Type == ParameterTypeChoice && d.Definition.Choices != nil {
+			p.Choices = d.Definition.Choices
+		}
+	}
+	return p
 }
