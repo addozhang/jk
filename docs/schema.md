@@ -182,7 +182,7 @@ PendingInput:
   id: string                       # experimental
   message: string                  # experimental
   ok: string                       # experimental — label of the "proceed" button
-  parameters: Parameter[]          # experimental — input-step parameters (reuses §3.4 shape)
+  parameters: Parameter[]          # stable — input-step parameters (reuses §3.4 shape); consumed by `jk build input -p` validation
 ```
 
 ### 3.8 `jk build stages <url>`

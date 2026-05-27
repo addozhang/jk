@@ -262,7 +262,7 @@ type BuildStatus struct {
 }
 
 // PendingInput describes a paused pipeline input step. Stability:
-// experimental.
+// experimental, EXCEPT `Parameters` which is stable as of v0.2.
 type PendingInput struct {
 	// ID is the input step identifier.
 	ID string `json:"id"`
@@ -271,6 +271,8 @@ type PendingInput struct {
 	// OK is the label of the "proceed" button.
 	OK string `json:"ok"`
 	// Parameters are the input-step parameters (same shape as §3.4).
+	// Stability: stable — consumed by `jk build input -p` validation
+	// and the v0.2 parameterized submit endpoint.
 	Parameters []Parameter `json:"parameters"`
 }
 
