@@ -44,9 +44,21 @@ import (
 )
 
 // MapBuildStatus converts a build's `api/json` response into a
-// schema.BuildStatus. Computes BuildState from (building, result,
-// actions[].InputAction) and ProgressPercent from
-// (durationMs / estimatedDurationMs) clamped to [0,100].
+// schema.BuildStatus. Computes BuildState from (building,
+// actions[]._class containing InputAction) where `building == false`
+// short-circuits to DONE regardless of any historical InputAction
+// marker (Jenkins keeps those in actions[] after submission); and
+// ProgressPercent from (durationMs / estimatedDurationMs) clamped to
+// [0,100].
+//
+// The mapper does NOT populate BuildStatus.PendingInput from core
+// JSON: core's actions[] only carries the `_class` discriminator for
+// the input step, never the id/message/ok/parameters fields. Those
+// live on /wfapi/pendingInputActions and are mapped by MapPendingInput.
+// The CLI layer is responsible for making the secondary fetch when
+// HasPendingInputMarker reports true on a still-building build, and
+// assigning the result into BuildStatus.PendingInput. See openspec
+// change add-input-parameter-submission Decisions 6 and 7.
 func MapBuildStatus(raw []byte) (BuildStatus, error) {
 	var src struct {
 		Number            int          `json:"number"`
@@ -58,11 +70,7 @@ func MapBuildStatus(raw []byte) (BuildStatus, error) {
 		DurationMs        int64        `json:"duration"`
 		EstimatedDuration int64        `json:"estimatedDuration"`
 		Actions           []struct {
-			Class      string                   `json:"_class"`
-			ID         string                   `json:"id"`
-			Message    string                   `json:"message"`
-			OK         string                   `json:"ok"`
-			Parameters []rawParameterDefinition `json:"parameters"`
+			Class string `json:"_class"`
 		} `json:"actions"`
 	}
 	if err := json.Unmarshal(raw, &src); err != nil {
@@ -87,23 +95,26 @@ func MapBuildStatus(raw []byte) (BuildStatus, error) {
 		out.EstimatedDurationMs = &est
 	}
 
-	// Detect a pending InputAction. Jenkins emits the class name
-	// `org.jenkinsci.plugins.workflow.support.steps.input.InputAction`
-	// for paused inputs in core's actions[] array.
-	pending := findPendingInputAction(src.Actions)
-	if pending != nil {
-		out.PendingInput = pending
+	hasMarker := false
+	for _, a := range src.Actions {
+		if strings.Contains(a.Class, "InputAction") {
+			hasMarker = true
+			break
+		}
 	}
 
-	// Derive state. Order matters: PENDING_INPUT wins over RUNNING
-	// because a paused build still has building==true.
+	// Derive state. Order matters: building==false ALWAYS wins (a
+	// finished build cannot be pending anything, even if Jenkins
+	// left the historical InputAction marker in actions[]). Only
+	// when the build is still in flight does the marker promote
+	// RUNNING to PENDING_INPUT.
 	switch {
-	case pending != nil:
-		out.State = BuildStatePendingInput
-	case src.Building:
-		out.State = BuildStateRunning
-	default:
+	case !src.Building:
 		out.State = BuildStateDone
+	case hasMarker:
+		out.State = BuildStatePendingInput
+	default:
+		out.State = BuildStateRunning
 	}
 
 	// ProgressPercent: 100 once DONE, otherwise computed and clamped
@@ -125,32 +136,27 @@ func MapBuildStatus(raw []byte) (BuildStatus, error) {
 	return out, nil
 }
 
-// findPendingInputAction scans the actions[] list looking for a
-// Pipeline InputAction. Returns a *PendingInput (with non-nil
-// Parameters slice) when found, nil otherwise.
-func findPendingInputAction(actions []struct {
-	Class      string                   `json:"_class"`
-	ID         string                   `json:"id"`
-	Message    string                   `json:"message"`
-	OK         string                   `json:"ok"`
-	Parameters []rawParameterDefinition `json:"parameters"`
-}) *PendingInput {
-	for _, a := range actions {
-		if !strings.Contains(a.Class, "InputAction") {
-			continue
-		}
-		params := make([]Parameter, 0, len(a.Parameters))
-		for _, def := range a.Parameters {
-			params = append(params, def.toSchema())
-		}
-		return &PendingInput{
-			ID:         a.ID,
-			Message:    a.Message,
-			OK:         a.OK,
-			Parameters: params,
+// HasPendingInputMarker reports whether the core /api/json response
+// for a build carries an InputAction entry in its actions[] array.
+// This is the *presence bit* only — the populated fields
+// (id/message/ok/parameters) only live on /wfapi/pendingInputActions.
+// Callers use this to decide whether to make the wfapi enrichment
+// call. Returns an error only for malformed JSON.
+func HasPendingInputMarker(raw []byte) (bool, error) {
+	var src struct {
+		Actions []struct {
+			Class string `json:"_class"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(raw, &src); err != nil {
+		return false, fmt.Errorf("HasPendingInputMarker: %w", err)
+	}
+	for _, a := range src.Actions {
+		if strings.Contains(a.Class, "InputAction") {
+			return true, nil
 		}
 	}
-	return nil
+	return false, nil
 }
 
 // msToRFC3339UTC converts a Jenkins millisecond-since-epoch timestamp
