@@ -416,7 +416,7 @@ func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, input
 
 	submitCtx, cancelSubmit := cc.withTimeout(cmd.Context())
 	defer cancelSubmit()
-	if err = cc.client.SubmitInput(submitCtx, ref, resolvedID, proceed); err != nil {
+	if err = cc.client.SubmitInput(submitCtx, ref, resolvedID, proceed, nil); err != nil {
 		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
 	}
 
@@ -844,7 +844,7 @@ type buildClientSurface interface {
 	GetBuildStatus(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetBuildStages(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetPendingInputs(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
-	SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool) error
+	SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, parameters []jenkins.InputParameterValue) error
 	StreamConsoleLog(ctx context.Context, ref *jenkinsurl.Ref, w io.Writer, follow bool) error
 	GetStageLog(ctx context.Context, ref *jenkinsurl.Ref, flowNodeID string) ([]byte, error)
 	GetNodeDescribe(ctx context.Context, ref *jenkinsurl.Ref, flowNodeID string) ([]byte, error)

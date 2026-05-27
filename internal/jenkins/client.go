@@ -303,26 +303,96 @@ func (c *Client) GetPendingInputs(ctx context.Context, ref *jenkinsurl.Ref) ([]b
 	return c.getJSON(ctx, ref.APIPath("wfapi/pendingInputActions"), "")
 }
 
-// SubmitInput either proceeds or aborts a paused input step. The
-// proceedEmpty endpoint is used when no parameters need to be supplied
-// (which is the only shape v0.1 supports — parameter submission is a
-// v0.2 concern).
-func (c *Client) SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool) error {
+// InputParameterValue is one key/value pair to submit to a paused
+// `input` step that declares parameters. Submitted via SubmitInput's
+// classic `/input/<id>/submit` endpoint (see that method's doc for
+// the wire format).
+type InputParameterValue struct {
+	Name  string
+	Value string
+}
+
+// SubmitInput either proceeds or aborts a paused input step.
+//
+// Endpoint selection:
+//   - proceed == false              → POST /input/<id>/abort
+//     (parameters are IGNORED with no error; the CLI layer emits a
+//     warning when a user supplies -p with abort)
+//   - proceed == true, no parameters → POST /input/<id>/proceedEmpty
+//     (v0.1 path, unchanged)
+//   - proceed == true, parameters    → POST /input/<id>/submit with
+//     Content-Type: application/x-www-form-urlencoded and body
+//     `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>`
+//
+// The `submit` wire format mirrors what the Jenkins classic UI sends
+// and is spike-validated against the deploy-input harness pipeline.
+func (c *Client) SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, parameters []InputParameterValue) error {
 	if ref.BuildNumber == 0 {
 		return errors.New("jenkins: SubmitInput requires a Ref with a non-zero BuildNumber")
 	}
 	if inputID == "" {
 		return errors.New("jenkins: SubmitInput requires a non-empty inputID")
 	}
-	action := "abort"
-	if proceed {
-		action = "proceedEmpty"
+
+	if !proceed {
+		return c.postEmptyInput(ctx, ref, inputID, "abort")
 	}
+	if len(parameters) == 0 {
+		return c.postEmptyInput(ctx, ref, inputID, "proceedEmpty")
+	}
+	return c.postSubmitInput(ctx, ref, inputID, parameters)
+}
+
+// postEmptyInput POSTs an empty body to /input/<id>/<action>. Used
+// for both `abort` and `proceedEmpty`.
+func (c *Client) postEmptyInput(ctx context.Context, ref *jenkinsurl.Ref, inputID, action string) error {
 	endpoint := ref.APIPath("input/" + url.PathEscape(inputID) + "/" + action)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("jenkins: SubmitInput: build request: %w", err)
 	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer closeBody(resp.Body)
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20)) //nolint:errcheck // best-effort drain
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &HTTPStatusError{URL: endpoint, StatusCode: resp.StatusCode, Status: resp.Status}
+	}
+	return nil
+}
+
+// postSubmitInput POSTs the parameterized form-encoded body to
+// /input/<id>/submit. The inner JSON shape is fixed by Jenkins:
+// {"parameter":[{"name":..,"value":..}, ...]}.
+func (c *Client) postSubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, parameters []InputParameterValue) error {
+	type kv struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+	payload := struct {
+		Parameter []kv `json:"parameter"`
+	}{Parameter: make([]kv, 0, len(parameters))}
+	for _, p := range parameters {
+		payload.Parameter = append(payload.Parameter, kv(p))
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("jenkins: SubmitInput: marshal parameters: %w", err)
+	}
+
+	form := url.Values{}
+	form.Set("json", string(encoded))
+	body := form.Encode()
+
+	endpoint := ref.APIPath("input/" + url.PathEscape(inputID) + "/submit")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("jenkins: SubmitInput: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err

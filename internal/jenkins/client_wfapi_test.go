@@ -17,9 +17,14 @@ package jenkins_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/addozhang/jk/internal/jenkins"
 )
 
 // ---------------------------------------------------------------------------
@@ -87,7 +92,7 @@ func Test_Client_SubmitInput_Proceed(t *testing.T) {
 	})
 
 	ref := mustParseRef(t, srv.URL+"/job/svc/42")
-	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", true); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", true, nil); err != nil {
 		t.Errorf("SubmitInput(proceed): %v", err)
 	}
 }
@@ -103,8 +108,95 @@ func Test_Client_SubmitInput_Abort(t *testing.T) {
 	})
 
 	ref := mustParseRef(t, srv.URL+"/job/svc/42")
-	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", false); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", false, nil); err != nil {
 		t.Errorf("SubmitInput(abort): %v", err)
+	}
+}
+
+// SubmitInput with parameters posts to /input/<id>/submit with
+// Content-Type: application/x-www-form-urlencoded and a body of
+// `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>`.
+// This is the wire format Jenkins's classic input-submit endpoint
+// accepts (spike-validated against deploy-input harness pipeline).
+func Test_Client_SubmitInput_WithParameters_PostsFormJSON(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+
+	var (
+		gotMethod      string
+		gotContentType string
+		gotBody        []byte
+	)
+	rec.handle("/job/svc/42/input/Deploy/submit", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	ref := mustParseRef(t, srv.URL+"/job/svc/42")
+	params := []jenkins.InputParameterValue{
+		{Name: "ENV", Value: "prod"},
+		{Name: "DRY_RUN", Value: "false"},
+	}
+	if err := client.SubmitInput(context.Background(), ref, "Deploy", true, params); err != nil {
+		t.Fatalf("SubmitInput: %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Errorf("method=%s, want POST", gotMethod)
+	}
+	if gotContentType != "application/x-www-form-urlencoded" {
+		t.Errorf("Content-Type=%q, want application/x-www-form-urlencoded", gotContentType)
+	}
+
+	form, err := url.ParseQuery(string(gotBody))
+	if err != nil {
+		t.Fatalf("body is not form-encoded: %v (raw=%q)", err, gotBody)
+	}
+	jsonField := form.Get("json")
+	if jsonField == "" {
+		t.Fatalf("body missing `json` field: %q", gotBody)
+	}
+
+	var inner struct {
+		Parameter []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"parameter"`
+	}
+	if err := json.Unmarshal([]byte(jsonField), &inner); err != nil {
+		t.Fatalf("json field is not valid JSON: %v (raw=%q)", err, jsonField)
+	}
+	if len(inner.Parameter) != 2 {
+		t.Fatalf("len(parameter)=%d, want 2", len(inner.Parameter))
+	}
+	if inner.Parameter[0].Name != "ENV" || inner.Parameter[0].Value != "prod" {
+		t.Errorf("parameter[0]=%+v, want {ENV prod}", inner.Parameter[0])
+	}
+	if inner.Parameter[1].Name != "DRY_RUN" || inner.Parameter[1].Value != "false" {
+		t.Errorf("parameter[1]=%+v, want {DRY_RUN false}", inner.Parameter[1])
+	}
+}
+
+// Regression: when proceed==false (abort), parameters are ignored —
+// neither the /submit nor the /proceedEmpty endpoint is reached.
+// newMux's catch-all asserts no other path is hit.
+func Test_Client_SubmitInput_AbortIgnoresParameters(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+
+	abortHit := false
+	rec.handle("/job/svc/42/input/Deploy/abort", func(w http.ResponseWriter, r *http.Request) {
+		abortHit = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	ref := mustParseRef(t, srv.URL+"/job/svc/42")
+	params := []jenkins.InputParameterValue{{Name: "ENV", Value: "prod"}}
+	if err := client.SubmitInput(context.Background(), ref, "Deploy", false, params); err != nil {
+		t.Fatalf("SubmitInput(abort): %v", err)
+	}
+	if !abortHit {
+		t.Error("expected /abort to be hit even with parameters supplied")
 	}
 }
 

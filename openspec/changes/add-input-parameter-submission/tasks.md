@@ -1,9 +1,9 @@
 ## 1. Schema and Client Surface
 
-- [ ] 1.1 In `internal/schema/types.go`, update the doc comment on `PendingInput.Parameters` to promote stability from `experimental` to `stable`. Mirror the change in `docs/schema.md §3.9`.
-- [ ] 1.2 In `internal/jenkins/client.go`, change `SubmitInput`'s signature to `SubmitInput(ctx, ref, inputID string, proceed bool, parameters []InputParameterValue) error` where `InputParameterValue{Name, Value string}` is a new exported struct in the same file.
-- [ ] 1.3 Endpoint selection inside `SubmitInput`: if `proceed == false` → `abort` (ignore parameters). If `proceed == true` AND `len(parameters) == 0` → `proceedEmpty` (v0.1 path, untouched). If `proceed == true` AND `len(parameters) > 0` → build a `submit` POST with body `Content-Type: application/x-www-form-urlencoded`, body `json=<URL-encoded JSON of {"parameter":[...]}>`. Use `encoding/json` for the inner JSON and `net/url` for the form encoding.
-- [ ] 1.4 Add unit tests in `internal/jenkins/client_wfapi_test.go`: one for the `proceedEmpty` path (unchanged, regression guard), one for the `submit` path asserting the exact wire-format body, and one for the `abort` path asserting parameters are ignored.
+- [x] 1.1 In `internal/schema/types.go`, update the doc comment on `PendingInput.Parameters` to promote stability from `experimental` to `stable`. Mirror the change in `docs/schema.md §3.9`.
+- [x] 1.2 In `internal/jenkins/client.go`, change `SubmitInput`'s signature to `SubmitInput(ctx, ref, inputID string, proceed bool, parameters []InputParameterValue) error` where `InputParameterValue{Name, Value string}` is a new exported struct in the same file.
+- [x] 1.3 Endpoint selection inside `SubmitInput`: if `proceed == false` → `abort` (ignore parameters). If `proceed == true` AND `len(parameters) == 0` → `proceedEmpty` (v0.1 path, untouched). If `proceed == true` AND `len(parameters) > 0` → build a `submit` POST with body `Content-Type: application/x-www-form-urlencoded`, body `json=<URL-encoded JSON of {"parameter":[...]}>`. Use `encoding/json` for the inner JSON and `net/url` for the form encoding.
+- [x] 1.4 Add unit tests in `internal/jenkins/client_wfapi_test.go`: one for the `proceedEmpty` path (unchanged, regression guard), one for the `submit` path asserting the exact wire-format body, and one for the `abort` path asserting parameters are ignored.
 
 ## 2. CLI Parameter Parsing and Validation
 
