@@ -1,0 +1,54 @@
+# Parser conformance corpus for internal/jenkinsurl.Parse.
+#
+# These URLs were collected from production Jenkins instances and the
+# e2e harness; each one is exercised by Test_Parse in
+# internal/jenkinsurl/parse_test.go. Comment lines (starting with `#`)
+# and blank lines are ignored.
+#
+# The corpus intentionally covers every documented shape:
+#   - top-level single-segment pipeline (with/without trailing slash)
+#   - nested folder paths
+#   - multibranch (branch is a regular /job/ segment)
+#   - build-number-suffixed
+#   - non-default port (HTTP 8080)
+#   - explicit default ports (:443, :80) that must be normalized away
+#   - percent-encoded path segments
+#   - mixed case hostname (must lowercase)
+#   - trailing query + fragment (must be stripped from JobSegments)
+#   - localhost harness URLs
+
+# Top-level pipeline, trailing slash
+https://jenkins.foo.com/job/svc/
+
+# Top-level pipeline, no trailing slash
+https://jenkins.foo.com/job/svc
+
+# Folder-nested pipeline (two folders deep)
+https://jenkins.foo.com/job/team/job/platform/job/svc/
+
+# Multibranch pipeline build (folder + multibranch + branch + #42)
+https://jenkins.foo.com/job/team/job/svc/job/main/42/
+
+# Non-default port (e2e harness shape)
+http://jenkins.local:8080/job/svc/
+
+# Explicit default HTTPS port (normalize away :443)
+https://jenkins.foo.com:443/job/svc/
+
+# Explicit default HTTP port (normalize away :80)
+http://jenkins.foo.com:80/job/svc/
+
+# Percent-encoded segment (`my pipeline` with a space)
+https://jenkins.foo.com/job/my%20pipeline/
+
+# Query + fragment must not leak into JobSegments
+https://jenkins.foo.com/job/svc/?foo=bar#frag
+
+# Build-number suffix without trailing slash
+https://jenkins.foo.com/job/svc/7
+
+# Mixed-case hostname (must lowercase to canonical Host)
+https://Jenkins.FOO.com/job/svc/
+
+# Local e2e harness build URL (deploy-input pipeline)
+http://localhost:18080/job/deploy-input/21/
