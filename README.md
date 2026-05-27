@@ -52,6 +52,10 @@ jk build trigger https://jenkins.example.com/job/my-folder/job/my-pipeline \
 
 # 4. Tail the console log of the latest build
 jk build logs https://jenkins.example.com/job/my-folder/job/my-pipeline/lastBuild -f
+
+# 5. Respond to a paused input step with parameter values
+jk build input https://jenkins.example.com/job/deploy/42 proceed \
+    -p ENV=prod -p DRY_RUN=false
 ```
 
 ## First-time setup
@@ -137,6 +141,22 @@ schema=$(jk pipeline info https://host/job/foo -o json | jq -r '.schemaVersion')
 ```
 
 Breaking changes will increment the version; additive changes (new fields, new enum values tagged `experimental`) will not. See [`docs/schema.md`](./docs/schema.md) for the full field reference and versioning policy.
+
+## Release notes
+
+### v0.2.0 — input-step parameters and status correctness
+
+**New features**
+
+- `jk build input <url> proceed` now accepts repeatable `-p KEY=VALUE` flags to submit parameter values to a paused input step. `@PATH` loads the value from a file. Values are validated client-side against the pending input's declared shape (CHOICE / BOOLEAN / STRING / TEXT / PASSWORD) before any HTTP call; invalid values exit `10` with a message that names the offending parameter and lists the valid choices.
+- `pendingInput.parameters` in `jk build status` output is promoted from `experimental` to `stable`. Scripts can rely on the field name and `Parameter` shape.
+
+**Behavior changes (bug fixes)**
+
+- Finished builds no longer report `state: PENDING_INPUT`. A non-building build is always `DONE`, regardless of whether a stale `pendingInput` action marker is still attached to Jenkins's core `/api/json` response.
+- Live paused builds now populate `pendingInput.id`, `pendingInput.message`, and `pendingInput.parameters` correctly. The data is sourced from `/wfapi/pendingInputActions` rather than the core `actions[]` array, which only carries an `_class` marker.
+
+See [`docs/schema.md §3.7` and `§3.9`](./docs/schema.md) for the full field reference and endpoint wire-format details.
 
 ## Develop
 
