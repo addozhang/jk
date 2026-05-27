@@ -1,30 +1,30 @@
 ## 1. Schema and Client Surface
 
 - [x] 1.1 In `internal/schema/types.go`, update the doc comment on `PendingInput.Parameters` to promote stability from `experimental` to `stable`. Mirror the change in `docs/schema.md §3.9`.
-- [x] 1.2 In `internal/jenkins/client.go`, change `SubmitInput`'s signature to `SubmitInput(ctx, ref, inputID string, proceed bool, parameters []InputParameterValue) error` where `InputParameterValue{Name, Value string}` is a new exported struct in the same file.
-- [x] 1.3 Endpoint selection inside `SubmitInput`: if `proceed == false` → `abort` (ignore parameters). If `proceed == true` AND `len(parameters) == 0` → `proceedEmpty` (v0.1 path, untouched). If `proceed == true` AND `len(parameters) > 0` → build a `submit` POST with body `Content-Type: application/x-www-form-urlencoded`, body `json=<URL-encoded JSON of {"parameter":[...]}>`. Use `encoding/json` for the inner JSON and `net/url` for the form encoding.
+- [x] 1.2 In `internal/jenkins/client.go`, change `SubmitInput`'s signature to `SubmitInput(ctx, ref, inputID string, proceed bool, proceedText string, parameters []InputParameterValue) error` where `InputParameterValue{Name, Value string}` is a new exported struct in the same file. _(proceedText added during integration — Jenkins's `/submit` endpoint requires the input step's `ok` label in a `proceed=<text>` form field; without it Jenkins records "Rejected by <user>" and aborts the build.)_
+- [x] 1.3 Endpoint selection inside `SubmitInput`: if `proceed == false` → `abort` (ignore parameters). If `proceed == true` AND `len(parameters) == 0` → `proceedEmpty` (v0.1 path, untouched). If `proceed == true` AND `len(parameters) > 0` → build a `submit` POST with body `Content-Type: application/x-www-form-urlencoded`, body `json=<URL-encoded JSON of {"parameter":[...]}>&proceed=<URL-encoded proceedText>`. Use `encoding/json` for the inner JSON and `net/url` for the form encoding.
 - [x] 1.4 Add unit tests in `internal/jenkins/client_wfapi_test.go`: one for the `proceedEmpty` path (unchanged, regression guard), one for the `submit` path asserting the exact wire-format body, and one for the `abort` path asserting parameters are ignored.
 
 ## 2. CLI Parameter Parsing and Validation
 
-- [ ] 2.1 In `internal/cli/build.go`, extract the existing `-p KEY=VALUE` parsing logic from `newBuildTriggerCommand` into a package-private helper `parseParamFlags(flags []string) (map[string]string, error)` so it can be shared. Preserve `@file` semantics (read file when value starts with `@`).
-- [ ] 2.2 Add `-p` / `--param` repeatable string-slice flag to `newBuildInputCommand`. Wire it through `runBuildInput(cmd, flags, rawURL, action, inputID, paramFlags)`.
-- [ ] 2.3 After fetching pending inputs (existing code at `runBuildInput` line ~348) and picking the input ID, fetch the chosen input's `Parameters []Parameter` from the decoded `pendingInputItem` (extend `pendingInputItem` decoding if needed).
-- [ ] 2.4 Implement `validateInputParameters(declared []Parameter, supplied map[string]string) ([]jenkins.InputParameterValue, error)` in `internal/cli/build.go`. Walk every supplied key → assert it appears in `declared`. Walk every declared key → if absent from `supplied`, require a `defaultValue`. For `CHOICE`, assert the value is in `choices`. For `BOOLEAN`, accept case-insensitive `true`/`false`/`1`/`0`. For `STRING`/`TEXT`/`PASSWORD`/`UNKNOWN`, accept any string. Each error MUST be a `jkerrors.JKError` with code `invalid_input_parameter`, an actionable `Suggestion`, and return exit code `10`.
-- [ ] 2.5 Call `validateInputParameters` before `SubmitInput`. On validation error, return without contacting Jenkins.
-- [ ] 2.6 For `action == "abort"`: if `len(paramFlags) > 0`, write `warning: -p flags are ignored for 'abort'\n` to `cmd.ErrOrStderr()` once, then continue with the abort path.
+- [x] 2.1 In `internal/cli/build.go`, extract the existing `-p KEY=VALUE` parsing logic from `newBuildTriggerCommand` into a package-private helper `parseParamFlags(flags []string) (map[string]string, error)` so it can be shared. Preserve `@file` semantics (read file when value starts with `@`). _(Already done in v0.1 — helper lives in `common.go:193`.)_
+- [x] 2.2 Add `-p` / `--param` repeatable string-slice flag to `newBuildInputCommand`. Wire it through `runBuildInput(cmd, flags, rawURL, action, inputID, paramFlags)`.
+- [x] 2.3 After fetching pending inputs (existing code at `runBuildInput` line ~348) and picking the input ID, fetch the chosen input's `Parameters []Parameter` from the decoded `pendingInputItem` (extend `pendingInputItem` decoding if needed).
+- [x] 2.4 Implement `validateInputParameters(declared []Parameter, supplied map[string]string) ([]jenkins.InputParameterValue, error)` in `internal/cli/build.go`. Walk every supplied key → assert it appears in `declared`. Walk every declared key → if absent from `supplied`, require a `defaultValue`. For `CHOICE`, assert the value is in `choices`. For `BOOLEAN`, accept case-insensitive `true`/`false`/`1`/`0`. For `STRING`/`TEXT`/`PASSWORD`/`UNKNOWN`, accept any string. Each error MUST be a `jkerrors.JKError` with code `invalid_input_parameter`, an actionable `Suggestion`, and return exit code `10`.
+- [x] 2.5 Call `validateInputParameters` before `SubmitInput`. On validation error, return without contacting Jenkins.
+- [x] 2.6 For `action == "abort"`: if `len(paramFlags) > 0`, write `warning: -p flags are ignored for 'abort'\n` to `cmd.ErrOrStderr()` once, then continue with the abort path.
 
 ## 3. CLI Unit Tests
 
-- [ ] 3.1 Add `Test_BuildInput_SubmitSingleChoice` to `internal/cli/build_test.go`: stub Jenkins responds with one pending input declaring `ENV` (CHOICE: staging/prod). Run with `-p ENV=prod`. Assert the recorded POST hits `/input/Deploy/submit`, Content-Type `application/x-www-form-urlencoded`, body decodes to the expected JSON.
-- [ ] 3.2 Add `Test_BuildInput_SubmitMixedTypesIncludingAtFile`: input declares CHOICE + BOOLEAN + TEXT. Use `-p NOTES=@<tempfile>`. Assert tempfile contents land in the `NOTES` value.
-- [ ] 3.3 Add `Test_BuildInput_UnknownParamKey`: stub input declares `ENV` only; user supplies `-p REGION=eu`. Assert no HTTP call made, exit code 10, stderr lists `ENV` as valid.
-- [ ] 3.4 Add `Test_BuildInput_InvalidChoice`: `-p ENV=devvv` against `["staging","prod"]`. Assert exit 10, stderr lists choices.
-- [ ] 3.5 Add `Test_BuildInput_RequiredParamMissing`: input declares `ENV` (no default), user passes no `-p`. Assert exit 10, stderr names `ENV`.
-- [ ] 3.6 Add `Test_BuildInput_AllDefaultsUsesSubmit`: input declares one CHOICE with a default, user passes no `-p`. Assert POST hits `/submit` with the default value (not `/proceedEmpty`).
-- [ ] 3.7 Add `Test_BuildInput_ZeroParamsUsesProceedEmpty`: input declares zero parameters. Assert POST hits `/proceedEmpty` (regression guard for v0.1 path).
-- [ ] 3.8 Add `Test_BuildInput_AbortIgnoresParams`: `abort -p X=Y` → assert POST hits `/abort`, stderr contains the warning line, exit 0.
-- [ ] 3.9 Add `Test_BuildInput_BooleanParsing`: parametric test over `true`/`True`/`TRUE`/`false`/`False`/`1`/`0` → accept; over `yes`/`no`/`maybe` → exit 10.
+- [x] 3.1 Add `Test_BuildInput_SubmitSingleChoice` to `internal/cli/build_test.go`: stub Jenkins responds with one pending input declaring `ENV` (CHOICE: staging/prod). Run with `-p ENV=prod`. Assert the recorded POST hits `/input/Deploy/submit`, Content-Type `application/x-www-form-urlencoded`, body decodes to the expected JSON.
+- [x] 3.2 Add `Test_BuildInput_SubmitMixedTypesIncludingAtFile`: input declares CHOICE + BOOLEAN + TEXT. Use `-p NOTES=@<tempfile>`. Assert tempfile contents land in the `NOTES` value.
+- [x] 3.3 Add `Test_BuildInput_UnknownParamKey`: stub input declares `ENV` only; user supplies `-p REGION=eu`. Assert no HTTP call made, exit code 10, stderr lists `ENV` as valid.
+- [x] 3.4 Add `Test_BuildInput_InvalidChoice`: `-p ENV=devvv` against `["staging","prod"]`. Assert exit 10, stderr lists choices.
+- [x] 3.5 Add `Test_BuildInput_RequiredParamMissing`: input declares `ENV` (no default), user passes no `-p`. Assert exit 10, stderr names `ENV`.
+- [x] 3.6 Add `Test_BuildInput_AllDefaultsUsesSubmit`: input declares one CHOICE with a default, user passes no `-p`. Assert POST hits `/submit` with the default value (not `/proceedEmpty`).
+- [x] 3.7 Add `Test_BuildInput_ZeroParamsUsesProceedEmpty`: input declares zero parameters. Assert POST hits `/proceedEmpty` (regression guard for v0.1 path).
+- [x] 3.8 Add `Test_BuildInput_AbortIgnoresParams`: `abort -p X=Y` → assert POST hits `/abort`, stderr contains the warning line, exit 0.
+- [x] 3.9 Add `Test_BuildInput_BooleanParsing`: parametric test over `true`/`True`/`TRUE`/`false`/`False`/`1`/`0` → accept; over `yes`/`no`/`maybe` → exit 10.
 
 ## 4. End-to-End Test
 
@@ -55,6 +55,6 @@
 - [ ] 7.1 Run `make test-unit && make lint` — both must be green.
 - [ ] 7.2 Run `make test-e2e` against the local harness — all tests including the two new write-path tests and the read-path enrichment tests must pass.
 - [ ] 7.3 Run `openspec validate add-input-parameter-submission --strict` — must pass.
-- [ ] 7.4 Manually verify against the harness: trigger `deploy-input`, run `jk build status <url>` while paused → confirm populated `pendingInput`; run `jk build input <url> proceed -p ENV=prod -p DRY_RUN=false` → confirm success; run `jk build status <url>` after completion → confirm `state: DONE`, no `pendingInput`.
+- [x] 7.4 Manually verify against the harness: trigger `deploy-input`, run `jk build status <url>` while paused → confirm populated `pendingInput`; run `jk build input <url> proceed -p ENV=prod -p DRY_RUN=false` → confirm success; run `jk build status <url>` after completion → confirm `state: DONE`, no `pendingInput`.
 - [ ] 7.5 Commit using conventional commit style: `feat(build): submit input step parameters via -p flag and fix status read path`.
 - [ ] 7.6 Tag and release v0.2.0 once dogfood validates the new flag against ≥1 real-world parameterized input pipeline.

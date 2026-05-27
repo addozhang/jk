@@ -92,7 +92,7 @@ func Test_Client_SubmitInput_Proceed(t *testing.T) {
 	})
 
 	ref := mustParseRef(t, srv.URL+"/job/svc/42")
-	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", true, nil); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", true, "", nil); err != nil {
 		t.Errorf("SubmitInput(proceed): %v", err)
 	}
 }
@@ -108,16 +108,18 @@ func Test_Client_SubmitInput_Abort(t *testing.T) {
 	})
 
 	ref := mustParseRef(t, srv.URL+"/job/svc/42")
-	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", false, nil); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "approve-deploy", false, "", nil); err != nil {
 		t.Errorf("SubmitInput(abort): %v", err)
 	}
 }
 
 // SubmitInput with parameters posts to /input/<id>/submit with
 // Content-Type: application/x-www-form-urlencoded and a body of
-// `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>`.
+// `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>&proceed=<proceedText>`.
 // This is the wire format Jenkins's classic input-submit endpoint
 // accepts (spike-validated against deploy-input harness pipeline).
+// The `proceed` field is the input step's `ok` label — without it
+// Jenkins records "Rejected by <user>" and aborts the build.
 func Test_Client_SubmitInput_WithParameters_PostsFormJSON(t *testing.T) {
 	client, rec, srv := newClientAgainst(t)
 
@@ -138,7 +140,7 @@ func Test_Client_SubmitInput_WithParameters_PostsFormJSON(t *testing.T) {
 		{Name: "ENV", Value: "prod"},
 		{Name: "DRY_RUN", Value: "false"},
 	}
-	if err := client.SubmitInput(context.Background(), ref, "Deploy", true, params); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "Deploy", true, "Deploy", params); err != nil {
 		t.Fatalf("SubmitInput: %v", err)
 	}
 
@@ -152,6 +154,9 @@ func Test_Client_SubmitInput_WithParameters_PostsFormJSON(t *testing.T) {
 	form, err := url.ParseQuery(string(gotBody))
 	if err != nil {
 		t.Fatalf("body is not form-encoded: %v (raw=%q)", err, gotBody)
+	}
+	if got := form.Get("proceed"); got != "Deploy" {
+		t.Errorf("proceed field=%q, want %q", got, "Deploy")
 	}
 	jsonField := form.Get("json")
 	if jsonField == "" {
@@ -178,6 +183,23 @@ func Test_Client_SubmitInput_WithParameters_PostsFormJSON(t *testing.T) {
 	}
 }
 
+// Guard: submitting parameters without a proceedText is an error
+// caught BEFORE any HTTP call. Empty proceedText would cause Jenkins
+// to record "Rejected by <user>" silently (HTTP 200) and abort the
+// build, so we fail fast at the client boundary.
+func Test_Client_SubmitInput_RequiresProceedTextWhenParameters(t *testing.T) {
+	client, _, srv := newClientAgainst(t)
+	ref := mustParseRef(t, srv.URL+"/job/svc/42")
+	params := []jenkins.InputParameterValue{{Name: "ENV", Value: "prod"}}
+	err := client.SubmitInput(context.Background(), ref, "Deploy", true, "", params)
+	if err == nil {
+		t.Fatal("expected error when proceedText is empty with parameters, got nil")
+	}
+	if !strings.Contains(err.Error(), "proceedText") {
+		t.Errorf("error=%q, want mention of proceedText", err)
+	}
+}
+
 // Regression: when proceed==false (abort), parameters are ignored —
 // neither the /submit nor the /proceedEmpty endpoint is reached.
 // newMux's catch-all asserts no other path is hit.
@@ -192,7 +214,7 @@ func Test_Client_SubmitInput_AbortIgnoresParameters(t *testing.T) {
 
 	ref := mustParseRef(t, srv.URL+"/job/svc/42")
 	params := []jenkins.InputParameterValue{{Name: "ENV", Value: "prod"}}
-	if err := client.SubmitInput(context.Background(), ref, "Deploy", false, params); err != nil {
+	if err := client.SubmitInput(context.Background(), ref, "Deploy", false, "", params); err != nil {
 		t.Fatalf("SubmitInput(abort): %v", err)
 	}
 	if !abortHit {
