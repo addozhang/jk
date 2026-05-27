@@ -316,17 +316,23 @@ type InputParameterValue struct {
 //
 // Endpoint selection:
 //   - proceed == false              → POST /input/<id>/abort
-//     (parameters are IGNORED with no error; the CLI layer emits a
-//     warning when a user supplies -p with abort)
+//     (parameters and proceedText IGNORED with no error; the CLI
+//     layer emits a warning when a user supplies -p with abort)
 //   - proceed == true, no parameters → POST /input/<id>/proceedEmpty
 //     (v0.1 path, unchanged)
 //   - proceed == true, parameters    → POST /input/<id>/submit with
 //     Content-Type: application/x-www-form-urlencoded and body
-//     `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>`
+//     `json=<URL-encoded JSON of {"parameter":[{"name":..,"value":..}]}>&proceed=<proceedText>`
 //
-// The `submit` wire format mirrors what the Jenkins classic UI sends
-// and is spike-validated against the deploy-input harness pipeline.
-func (c *Client) SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, parameters []InputParameterValue) error {
+// The `submit` wire format mirrors what the Jenkins classic UI sends.
+// The `proceed=<proceedText>` field is REQUIRED — without it Jenkins
+// treats the submission as ambiguous and rejects it with "Rejected by
+// <user>", failing the build. proceedText is the `ok` label of the
+// input step (the same value surfaced as PendingInput.OK in the
+// schema), captured from /wfapi/pendingInputActions.
+//
+// Spike-validated against the deploy-input harness pipeline (build #7).
+func (c *Client) SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, proceedText string, parameters []InputParameterValue) error {
 	if ref.BuildNumber == 0 {
 		return errors.New("jenkins: SubmitInput requires a Ref with a non-zero BuildNumber")
 	}
@@ -340,7 +346,10 @@ func (c *Client) SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID s
 	if len(parameters) == 0 {
 		return c.postEmptyInput(ctx, ref, inputID, "proceedEmpty")
 	}
-	return c.postSubmitInput(ctx, ref, inputID, parameters)
+	if proceedText == "" {
+		return errors.New("jenkins: SubmitInput requires a non-empty proceedText when parameters are supplied")
+	}
+	return c.postSubmitInput(ctx, ref, inputID, proceedText, parameters)
 }
 
 // postEmptyInput POSTs an empty body to /input/<id>/<action>. Used
@@ -365,8 +374,11 @@ func (c *Client) postEmptyInput(ctx context.Context, ref *jenkinsurl.Ref, inputI
 
 // postSubmitInput POSTs the parameterized form-encoded body to
 // /input/<id>/submit. The inner JSON shape is fixed by Jenkins:
-// {"parameter":[{"name":..,"value":..}, ...]}.
-func (c *Client) postSubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, parameters []InputParameterValue) error {
+// {"parameter":[{"name":..,"value":..}, ...]}. The `proceed` form
+// field carries the input step's `ok` label (proceedText) — Jenkins
+// rejects the submission ("Rejected by <user>") if it is missing or
+// does not match the declared label.
+func (c *Client) postSubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceedText string, parameters []InputParameterValue) error {
 	type kv struct {
 		Name  string `json:"name"`
 		Value string `json:"value"`
@@ -384,6 +396,7 @@ func (c *Client) postSubmitInput(ctx context.Context, ref *jenkinsurl.Ref, input
 
 	form := url.Values{}
 	form.Set("json", string(encoded))
+	form.Set("proceed", proceedText)
 	body := form.Encode()
 
 	endpoint := ref.APIPath("input/" + url.PathEscape(inputID) + "/submit")

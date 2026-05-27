@@ -16,9 +16,12 @@ package cli
 //     adjustments to the error mapping.
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -779,6 +782,368 @@ func Test_BuildInput_MultiplePending_WithID(t *testing.T) {
 	}
 	if hitID != "Deploy-Approval" {
 		t.Errorf("expected POST to Deploy-Approval, got %q", hitID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 14.5b build input -p (v0.2 add-input-parameter-submission)
+// ---------------------------------------------------------------------------
+
+// pendingInputEnvOnly declares one CHOICE param with a default. Used
+// for "all defaults" and "invalid choice" tests.
+const pendingInputEnvOnly = `[{
+	"id":"Deploy","proceedText":"Deploy","message":"Pick env",
+	"inputs":[
+		{"type":"ChoiceParameterDefinition","name":"ENV",
+		 "definition":{"defaultVal":"staging","choices":["staging","prod"]}}
+	]
+}]`
+
+// pendingInputEnvNoDefault declares ENV without a default — submission
+// without -p must fail validation.
+const pendingInputEnvNoDefault = `[{
+	"id":"Deploy","proceedText":"Deploy","message":"Pick env",
+	"inputs":[
+		{"type":"ChoiceParameterDefinition","name":"ENV",
+		 "definition":{"choices":["staging","prod"]}}
+	]
+}]`
+
+// stubBuildStatus returns a minimal post-submit /api/json response.
+func stubBuildStatus(w http.ResponseWriter, _ *http.Request) {
+	fmt.Fprint(w, `{"number":5,"url":"http://example/job/svc/5/","building":true,"result":null,"timestamp":1700000000000,"duration":0,"estimatedDuration":-1,"actions":[]}`)
+}
+
+// decodeSubmitForm parses the form-encoded body of a /submit POST and
+// returns the inner JSON's parameter list as a name->value map.
+func decodeSubmitForm(t *testing.T, r *http.Request) map[string]string {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
+		t.Errorf("Content-Type=%q, want application/x-www-form-urlencoded", ct)
+	}
+	form, err := url.ParseQuery(string(body))
+	if err != nil {
+		t.Fatalf("parse form: %v (body=%q)", err, body)
+	}
+	jsonField := form.Get("json")
+	if jsonField == "" {
+		t.Fatalf("body missing json field: %q", body)
+	}
+	var inner struct {
+		Parameter []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"parameter"`
+	}
+	if err := json.Unmarshal([]byte(jsonField), &inner); err != nil {
+		t.Fatalf("inner JSON: %v (raw=%q)", err, jsonField)
+	}
+	out := make(map[string]string, len(inner.Parameter))
+	for _, p := range inner.Parameter {
+		out[p.Name] = p.Value
+	}
+	return out
+}
+
+// 3.1 Submit a single CHOICE parameter via -p ENV=prod.
+func Test_BuildInput_SubmitSingleChoice(t *testing.T) {
+	var got map[string]string
+	srv := newMux(t).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, pendingInputEnvOnly)
+		}).
+		handle("/job/svc/5/input/Deploy/submit", func(w http.ResponseWriter, r *http.Request) {
+			got = decodeSubmitForm(t, r)
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/5/api/json", stubBuildStatus).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "proceed", "-p", "ENV=prod"})
+	if err != nil {
+		t.Fatalf("build input: %v", err)
+	}
+	if got["ENV"] != "prod" {
+		t.Errorf("submitted ENV=%q, want prod (full=%v)", got["ENV"], got)
+	}
+}
+
+// 3.2 Mixed types incl. @file → value loaded from file.
+func Test_BuildInput_SubmitMixedTypesIncludingAtFile(t *testing.T) {
+	notesFile := t.TempDir() + "/notes.txt"
+	if err := os.WriteFile(notesFile, []byte("multi\nline notes"), 0o600); err != nil {
+		t.Fatalf("write tempfile: %v", err)
+	}
+
+	const pending = `[{
+		"id":"Release","proceedText":"Release","message":"Release",
+		"inputs":[
+			{"type":"ChoiceParameterDefinition","name":"ENV",
+			 "definition":{"defaultVal":"staging","choices":["staging","prod"]}},
+			{"type":"BooleanParameterDefinition","name":"DRY_RUN",
+			 "definition":{"defaultVal":true}},
+			{"type":"TextParameterDefinition","name":"NOTES",
+			 "definition":{"defaultVal":""}}
+		]
+	}]`
+
+	var got map[string]string
+	srv := newMux(t).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, pending)
+		}).
+		handle("/job/svc/5/input/Release/submit", func(w http.ResponseWriter, r *http.Request) {
+			got = decodeSubmitForm(t, r)
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/5/api/json", stubBuildStatus).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{
+		"build", "input", srv.URL + "/job/svc/5/", "proceed",
+		"-p", "ENV=prod",
+		"-p", "DRY_RUN=false",
+		"-p", "NOTES=@" + notesFile,
+	})
+	if err != nil {
+		t.Fatalf("build input: %v", err)
+	}
+	if got["ENV"] != "prod" || got["DRY_RUN"] != "false" {
+		t.Errorf("got=%v", got)
+	}
+	if got["NOTES"] != "multi\nline notes" {
+		t.Errorf("NOTES=%q, want multi\\nline notes", got["NOTES"])
+	}
+}
+
+// 3.3 Unknown -p key → exit 10, no HTTP submit.
+func Test_BuildInput_UnknownParamKey(t *testing.T) {
+	submitHit := false
+	srv := newMux(t).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, pendingInputEnvOnly)
+		}).
+		handle("/job/svc/5/input/Deploy/submit", func(w http.ResponseWriter, _ *http.Request) {
+			submitHit = true
+			w.WriteHeader(http.StatusOK)
+		}).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "proceed", "-p", "REGION=eu"})
+	if err == nil {
+		t.Fatal("expected error for unknown -p key")
+	}
+	if submitHit {
+		t.Error("submit endpoint must not be called when validation fails")
+	}
+	if got := jkerrors.ExitCode(err); got != 10 {
+		t.Errorf("exit code = %d, want 10", got)
+	}
+	if !strings.Contains(err.Error(), "ENV") {
+		t.Errorf("error must list valid parameter names: %q", err.Error())
+	}
+}
+
+// 3.4 Invalid choice value → exit 10, error lists choices.
+func Test_BuildInput_InvalidChoice(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, pendingInputEnvOnly)
+		}).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "proceed", "-p", "ENV=devvv"})
+	if err == nil {
+		t.Fatal("expected error for invalid choice")
+	}
+	if got := jkerrors.ExitCode(err); got != 10 {
+		t.Errorf("exit code = %d, want 10", got)
+	}
+	msg := err.Error()
+	for _, want := range []string{"staging", "prod"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error must list choice %q: %q", want, msg)
+		}
+	}
+}
+
+// 3.5 Required param missing (no default, no -p) → exit 10.
+func Test_BuildInput_RequiredParamMissing(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, pendingInputEnvNoDefault)
+		}).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "proceed"})
+	if err == nil {
+		t.Fatal("expected error for missing required param")
+	}
+	if got := jkerrors.ExitCode(err); got != 10 {
+		t.Errorf("exit code = %d, want 10", got)
+	}
+	if !strings.Contains(err.Error(), "ENV") {
+		t.Errorf("error must name missing param ENV: %q", err.Error())
+	}
+}
+
+// 3.6 All defaults available + no -p → posts /submit with the default
+// value (not /proceedEmpty). A declared-but-defaulted input requires
+// the parameterized endpoint because Jenkins doesn't infer defaults
+// for `input` steps the way it does for parameterized builds.
+func Test_BuildInput_AllDefaultsUsesSubmit(t *testing.T) {
+	var got map[string]string
+	proceedEmptyHit := false
+	srv := newMux(t).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, pendingInputEnvOnly)
+		}).
+		handle("/job/svc/5/input/Deploy/submit", func(w http.ResponseWriter, r *http.Request) {
+			got = decodeSubmitForm(t, r)
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/5/input/Deploy/proceedEmpty", func(w http.ResponseWriter, _ *http.Request) {
+			proceedEmptyHit = true
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/5/api/json", stubBuildStatus).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "proceed"})
+	if err != nil {
+		t.Fatalf("build input: %v", err)
+	}
+	if proceedEmptyHit {
+		t.Error("proceedEmpty must not be called when params are declared (defaults must be sent via /submit)")
+	}
+	if got["ENV"] != "staging" {
+		t.Errorf("default ENV=%q, want staging", got["ENV"])
+	}
+}
+
+// 3.7 Zero declared params + no -p → /proceedEmpty (v0.1 regression).
+func Test_BuildInput_ZeroParamsUsesProceedEmpty(t *testing.T) {
+	submitHit := false
+	proceedEmptyHit := false
+	srv := newMux(t).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{"id":"Approval","proceedText":"OK","message":"go?","inputs":[]}]`)
+		}).
+		handle("/job/svc/5/input/Approval/proceedEmpty", func(w http.ResponseWriter, _ *http.Request) {
+			proceedEmptyHit = true
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/5/input/Approval/submit", func(w http.ResponseWriter, _ *http.Request) {
+			submitHit = true
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/5/api/json", stubBuildStatus).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "proceed"})
+	if err != nil {
+		t.Fatalf("build input: %v", err)
+	}
+	if !proceedEmptyHit {
+		t.Error("proceedEmpty must be hit when zero params declared")
+	}
+	if submitHit {
+		t.Error("submit must NOT be hit when zero params declared")
+	}
+}
+
+// 3.8 abort + -p → POST /abort, warning to stderr, exit 0.
+func Test_BuildInput_AbortIgnoresParams(t *testing.T) {
+	abortHit := false
+	srv := newMux(t).
+		handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, pendingInputEnvOnly)
+		}).
+		handle("/job/svc/5/input/Deploy/abort", func(w http.ResponseWriter, _ *http.Request) {
+			abortHit = true
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/5/api/json", stubBuildStatus).
+		server()
+	defer srv.Close()
+
+	_, stderr, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "abort", "-p", "ENV=prod"})
+	if err != nil {
+		t.Fatalf("build input abort: %v", err)
+	}
+	if !abortHit {
+		t.Error("abort endpoint must be hit")
+	}
+	if !strings.Contains(stderr, "-p") || !strings.Contains(stderr, "ignored") {
+		t.Errorf("stderr must warn about ignored -p: %q", stderr)
+	}
+}
+
+// 3.9 BOOLEAN accepts true/True/TRUE/false/False/1/0; rejects others.
+func Test_BuildInput_BooleanParsing(t *testing.T) {
+	accept := []string{"true", "True", "TRUE", "false", "False", "1", "0"}
+	reject := []string{"yes", "no", "maybe"}
+
+	const pending = `[{
+		"id":"Deploy","proceedText":"Deploy","message":"go?",
+		"inputs":[
+			{"type":"BooleanParameterDefinition","name":"DRY_RUN",
+			 "definition":{"defaultVal":true}}
+		]
+	}]`
+
+	for _, v := range accept {
+		t.Run("accept_"+v, func(t *testing.T) {
+			submitted := false
+			srv := newMux(t).
+				handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+					fmt.Fprint(w, pending)
+				}).
+				handle("/job/svc/5/input/Deploy/submit", func(w http.ResponseWriter, _ *http.Request) {
+					submitted = true
+					w.WriteHeader(http.StatusOK)
+				}).
+				handle("/job/svc/5/api/json", stubBuildStatus).
+				server()
+			defer srv.Close()
+
+			_, _, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "proceed", "-p", "DRY_RUN=" + v})
+			if err != nil {
+				t.Fatalf("accept %q: %v", v, err)
+			}
+			if !submitted {
+				t.Errorf("submit not hit for %q", v)
+			}
+		})
+	}
+	for _, v := range reject {
+		t.Run("reject_"+v, func(t *testing.T) {
+			srv := newMux(t).
+				handle("/job/svc/5/wfapi/pendingInputActions", func(w http.ResponseWriter, _ *http.Request) {
+					fmt.Fprint(w, pending)
+				}).
+				server()
+			defer srv.Close()
+
+			_, _, err := runJK(t, []string{"build", "input", srv.URL + "/job/svc/5/", "proceed", "-p", "DRY_RUN=" + v})
+			if err == nil {
+				t.Fatalf("expected error for %q", v)
+			}
+			if got := jkerrors.ExitCode(err); got != 10 {
+				t.Errorf("exit code = %d, want 10 for %q", got, v)
+			}
+		})
 	}
 }
 

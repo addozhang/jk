@@ -358,7 +358,10 @@ func runBuildStages(cmd *cobra.Command, flags *GlobalFlags, rawURL string) error
 // ---------------------------------------------------------------------------
 
 func newBuildInputCommand(flags *GlobalFlags) *cobra.Command {
-	var inputID string
+	var (
+		inputID    string
+		paramFlags []string
+	)
 	cmd := &cobra.Command{
 		Use:   "input <build-url> proceed|abort",
 		Short: "Respond to a paused pipeline input step",
@@ -367,17 +370,31 @@ the build at <build-url>. When the build has exactly one pending
 input, the command operates on that input by default. When two or
 more inputs are pending, --input-id <id> is required.
 
+Pass input-step parameters with repeatable -p KEY=VALUE flags. Use
+@PATH to load a value from a file (the file is read verbatim, including
+trailing newlines). Values are validated client-side against the
+pending input's declared parameter shape:
+
+  - CHOICE   : value must appear in the declared choices list.
+  - BOOLEAN  : true/True/TRUE/false/False/1/0 (case-insensitive).
+  - STRING / TEXT / PASSWORD / UNKNOWN : any string.
+
+Unknown keys, invalid choices, or missing required parameters exit
+with code 10 without contacting Jenkins. -p is ignored (with a stderr
+warning) when the action is abort.
+
 See docs/schema.md §3.9 and specs/build §"Respond to a pending input step".`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBuildInput(cmd, flags, args[0], args[1], inputID)
+			return runBuildInput(cmd, flags, args[0], args[1], inputID, paramFlags)
 		},
 	}
 	cmd.Flags().StringVar(&inputID, "input-id", "", "select a specific pending input by id (required when multiple are pending)")
+	cmd.Flags().StringSliceVarP(&paramFlags, "param", "p", nil, "input-step parameter as KEY=VALUE (repeatable). Use @PATH to load value from a file. Ignored for the abort action.")
 	return cmd
 }
 
-func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, inputID string) error {
+func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, inputID string, paramFlags []string) error {
 	var proceed bool
 	switch strings.ToLower(action) {
 	case "proceed":
@@ -397,6 +414,20 @@ func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, input
 		return err
 	}
 
+	// Parse -p flags up front so file-read failures surface before
+	// any HTTP call.
+	supplied, err := parseParamFlags(paramFlags)
+	if err != nil {
+		return err
+	}
+
+	// For abort: -p is ignored. Warn once if supplied, then continue
+	// without enforcing validation against the declared params.
+	if !proceed && len(supplied) > 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning: -p flags are ignored for 'abort'") //nolint:errcheck
+		supplied = nil
+	}
+
 	// Fetch pending inputs first to (a) pick the default ID when only
 	// one is pending and (b) reject ambiguous invocations.
 	probeCtx, cancelProbe := cc.withTimeout(cmd.Context())
@@ -414,9 +445,24 @@ func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, input
 		return err
 	}
 
+	// Validate -p values against the declared parameter shape (proceed
+	// path only). validateInputParameters fills in defaults for declared
+	// params that were not supplied; an empty result means the v0.1
+	// proceedEmpty endpoint should be used.
+	var submitParams []jenkins.InputParameterValue
+	var proceedText string
+	if proceed {
+		declared := declaredParametersFor(pending, resolvedID)
+		submitParams, err = validateInputParameters(declared, supplied)
+		if err != nil {
+			return err
+		}
+		proceedText = proceedTextFor(pending, resolvedID)
+	}
+
 	submitCtx, cancelSubmit := cc.withTimeout(cmd.Context())
 	defer cancelSubmit()
-	if err = cc.client.SubmitInput(submitCtx, ref, resolvedID, proceed, nil); err != nil {
+	if err = cc.client.SubmitInput(submitCtx, ref, resolvedID, proceed, proceedText, submitParams); err != nil {
 		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
 	}
 
@@ -446,12 +492,29 @@ func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, input
 	return cc.render(result)
 }
 
-// pendingInputItem is the minimal shape we need to disambiguate; the
-// schema mapper's PendingInput returns only the first entry which is
-// insufficient for the multi-input case.
+// pendingInputItem is the minimal shape we need to disambiguate and
+// validate -p values; the schema mapper's PendingInput returns only
+// the first entry which is insufficient for the multi-input case.
+//
+// The `Inputs` field mirrors the wfapi shape (`type` + nested
+// `definition.defaultVal` / `definition.choices`); see
+// internal/schema/mapper_build.go rawWfapiInputParam.
 type pendingInputItem struct {
-	ID      string `json:"id"`
-	Message string `json:"message"`
+	ID          string                  `json:"id"`
+	ProceedText string                  `json:"proceedText"`
+	Message     string                  `json:"message"`
+	Inputs      []pendingInputParameter `json:"inputs"`
+}
+
+// pendingInputParameter mirrors one entry under wfapi pendingInputActions[].inputs[].
+type pendingInputParameter struct {
+	Type        string  `json:"type"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	Definition  *struct {
+		DefaultVal any      `json:"defaultVal"`
+		Choices    []string `json:"choices"`
+	} `json:"definition"`
 }
 
 // decodePendingInputList parses the wfapi pendingInputActions array.
@@ -521,6 +584,183 @@ func formatPendingList(pending []pendingInputItem) string {
 		fmt.Fprintf(&b, "  - %s: %s\n", it.ID, it.Message)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// declaredParametersFor returns the parameter definitions of the
+// pending input identified by id. Returns nil when id is not found
+// or the input declares no parameters.
+func declaredParametersFor(pending []pendingInputItem, id string) []pendingInputParameter {
+	for _, it := range pending {
+		if it.ID == id {
+			return it.Inputs
+		}
+	}
+	return nil
+}
+
+// proceedTextFor returns the `proceedText` (the input step's `ok`
+// label) for the pending input identified by id. Jenkins requires
+// this value in the form body of /input/<id>/submit; submitting
+// without it (or with a value that does not match the declared
+// label) is rejected as "Rejected by <user>", aborting the build.
+//
+// Returns the empty string when id is not found, which causes
+// Client.SubmitInput to error before any HTTP call when parameters
+// are supplied.
+func proceedTextFor(pending []pendingInputItem, id string) string {
+	for _, it := range pending {
+		if it.ID == id {
+			return it.ProceedText
+		}
+	}
+	return ""
+}
+
+// validateInputParameters walks the declared parameter list and the
+// user-supplied -p map, returning the final []jenkins.InputParameterValue
+// to submit. Behavior:
+//
+//   - Unknown supplied key (not present in declared)        -> JKError exit 10
+//   - Declared param with no value supplied and no default  -> JKError exit 10
+//   - Declared param with no value supplied and a default   -> use default
+//   - CHOICE value not in declared choices                  -> JKError exit 10
+//   - BOOLEAN value not in {true,false,1,0} (case-insens.)  -> JKError exit 10
+//   - STRING / TEXT / PASSWORD / UNKNOWN                    -> accepted as-is
+//
+// When the declared list is empty and the supplied map is empty,
+// returns (nil, nil) so the caller falls through to the v0.1
+// proceedEmpty path.
+func validateInputParameters(declared []pendingInputParameter, supplied map[string]string) ([]jenkins.InputParameterValue, error) {
+	// Build a set of declared names for the "unknown key" check.
+	declaredByName := make(map[string]pendingInputParameter, len(declared))
+	for _, d := range declared {
+		declaredByName[d.Name] = d
+	}
+
+	// Reject any supplied key that the pending input does not declare.
+	for k := range supplied {
+		if _, ok := declaredByName[k]; !ok {
+			validNames := make([]string, 0, len(declared))
+			for _, d := range declared {
+				validNames = append(validNames, d.Name)
+			}
+			suggestion := "No parameters are declared by this input."
+			if len(validNames) > 0 {
+				suggestion = "Valid parameters: " + strings.Join(validNames, ", ")
+			}
+			return nil, &jkerrors.JKError{
+				Code:       "invalid_input_parameter",
+				Message:    fmt.Sprintf("Unknown parameter %q for this input.", k),
+				Suggestion: suggestion,
+			}
+		}
+	}
+
+	// When neither side has anything, fall through to proceedEmpty.
+	if len(declared) == 0 && len(supplied) == 0 {
+		return nil, nil
+	}
+
+	// Validate each declared param, filling in defaults where needed.
+	out := make([]jenkins.InputParameterValue, 0, len(declared))
+	for _, d := range declared {
+		raw, present := supplied[d.Name]
+		if !present {
+			if d.Definition == nil || d.Definition.DefaultVal == nil {
+				return nil, &jkerrors.JKError{
+					Code:       "invalid_input_parameter",
+					Message:    fmt.Sprintf("Missing required parameter %q (no default value).", d.Name),
+					Suggestion: fmt.Sprintf("Pass -p %s=VALUE.", d.Name),
+				}
+			}
+			raw = formatDefaultVal(d.Definition.DefaultVal)
+		}
+
+		value, err := validateOneParameter(d, raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, jenkins.InputParameterValue{Name: d.Name, Value: value})
+	}
+	return out, nil
+}
+
+// validateOneParameter applies type-specific value rules and returns
+// the normalized wire-format string. Unknown / STRING / TEXT / PASSWORD
+// accept any value verbatim.
+func validateOneParameter(d pendingInputParameter, raw string) (string, error) {
+	pt := schemaClassifyParameter(d.Type)
+	switch pt {
+	case schema.ParameterTypeChoice:
+		if d.Definition != nil {
+			for _, c := range d.Definition.Choices {
+				if c == raw {
+					return raw, nil
+				}
+			}
+		}
+		choices := []string{}
+		if d.Definition != nil {
+			choices = d.Definition.Choices
+		}
+		return "", &jkerrors.JKError{
+			Code:       "invalid_input_parameter",
+			Message:    fmt.Sprintf("Parameter %q value %q is not a valid choice.", d.Name, raw),
+			Suggestion: "Valid choices: " + strings.Join(choices, ", "),
+		}
+	case schema.ParameterTypeBoolean:
+		switch strings.ToLower(raw) {
+		case "true", "false", "1", "0":
+			return strings.ToLower(raw), nil
+		default:
+			return "", &jkerrors.JKError{
+				Code:       "invalid_input_parameter",
+				Message:    fmt.Sprintf("Parameter %q value %q is not a boolean.", d.Name, raw),
+				Suggestion: "Use true, false, 1, or 0 (case-insensitive).",
+			}
+		}
+	default:
+		// STRING / TEXT / PASSWORD / UNKNOWN: pass through.
+		return raw, nil
+	}
+}
+
+// schemaClassifyParameter is a local reuse of schema.classifyParameterType
+// keyed off the wfapi `type` field (simple class name). Kept private
+// to internal/cli to avoid exporting the helper from internal/schema.
+func schemaClassifyParameter(typeName string) schema.ParameterType {
+	switch {
+	case strings.Contains(typeName, "StringParameter"):
+		return schema.ParameterTypeString
+	case strings.Contains(typeName, "BooleanParameter"):
+		return schema.ParameterTypeBoolean
+	case strings.Contains(typeName, "ChoiceParameter"):
+		return schema.ParameterTypeChoice
+	case strings.Contains(typeName, "TextParameter"):
+		return schema.ParameterTypeText
+	case strings.Contains(typeName, "PasswordParameter"):
+		return schema.ParameterTypePassword
+	default:
+		return schema.ParameterTypeUnknown
+	}
+}
+
+// formatDefaultVal renders a JSON-decoded default value as the string
+// Jenkins expects on the wire. Bools become "true"/"false" rather than
+// Go's "%v" output (which would also be correct, but we keep it
+// explicit). Numbers go through fmt.Sprintf("%v", ...).
+func formatDefaultVal(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprintf("%v", t)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -844,7 +1084,7 @@ type buildClientSurface interface {
 	GetBuildStatus(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetBuildStages(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetPendingInputs(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
-	SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, parameters []jenkins.InputParameterValue) error
+	SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, proceedText string, parameters []jenkins.InputParameterValue) error
 	StreamConsoleLog(ctx context.Context, ref *jenkinsurl.Ref, w io.Writer, follow bool) error
 	GetStageLog(ctx context.Context, ref *jenkinsurl.Ref, flowNodeID string) ([]byte, error)
 	GetNodeDescribe(ctx context.Context, ref *jenkinsurl.Ref, flowNodeID string) ([]byte, error)
