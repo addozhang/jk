@@ -52,9 +52,9 @@
 
 ## 7. Validation and Release
 
-- [ ] 7.1 Run `make test-unit && make lint` — both must be green.
-- [ ] 7.2 Run `make test-e2e` against the local harness — all tests including the two new write-path tests and the read-path enrichment tests must pass.
-- [ ] 7.3 Run `openspec validate add-input-parameter-submission --strict` — must pass.
+- [x] 7.1 Run `make test-unit && make lint` — both must be green.
+- [x] 7.2 Run `make test-e2e` against the local harness — all tests including the two new write-path tests and the read-path enrichment tests must pass.
+- [x] 7.3 Run `openspec validate add-input-parameter-submission --strict` — must pass.
 - [x] 7.4 Manually verify against the harness: trigger `deploy-input`, run `jk build status <url>` while paused → confirm populated `pendingInput`; run `jk build input <url> proceed -p ENV=prod -p DRY_RUN=false` → confirm success; run `jk build status <url>` after completion → confirm `state: DONE`, no `pendingInput`.
-- [ ] 7.5 Commit using conventional commit style: `feat(build): submit input step parameters via -p flag and fix status read path`.
+- [x] 7.5 Commit using conventional commit style: `feat(build): submit input step parameters via -p flag and fix status read path`.
 - [ ] 7.6 Tag and release v0.2.0 once dogfood validates the new flag against ≥1 real-world parameterized input pipeline.
