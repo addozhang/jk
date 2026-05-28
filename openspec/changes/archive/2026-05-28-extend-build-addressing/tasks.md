@@ -74,5 +74,5 @@
 
 - [x] 13.1 Run `make test-unit && make lint` for every touched package; confirm green.
 - [x] 13.2 Run the full e2e suite against the local harness (`make test-e2e` or equivalent); confirm green.
-- [ ] 13.3 Manual dogfood: copy a `lastBuild` URL from a real Jenkins UI, run `jk build status` and `jk build params` against it; confirm both succeed and the resolved numeric build number is correct.
-- [ ] 13.4 Decide v0.2.1 (patch — permalinks alone arguably fit) vs v0.3.0 (minor — new `build params` command is additive surface area). Recommendation: v0.3.0 because a new command warrants a minor bump under semver-flavored intent. Tag and release once 13.1–13.3 pass.
+- [x] 13.3 Manual dogfood: copy a `lastBuild` URL from a real Jenkins UI, run `jk build status` and `jk build params` against it; confirm both succeed and the resolved numeric build number is correct.
+- [x] 13.4 Decide v0.2.1 (patch — permalinks alone arguably fit) vs v0.3.0 (minor — new `build params` command is additive surface area). Recommendation: v0.3.0 because a new command warrants a minor bump under semver-flavored intent. Tag and release once 13.1–13.3 pass.
