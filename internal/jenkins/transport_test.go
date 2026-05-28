@@ -483,6 +483,55 @@ func Test_NoDebug_DoesNotLog(t *testing.T) {
 	}
 }
 
+// Regression: the debug logger must not consume the request body. An
+// earlier implementation cloned the request shallowly and passed it to
+// httputil.DumpRequest(..., true), which drained the shared Body. The
+// next RoundTripper (and ultimately Go's transport) then sent an empty
+// body, which some HTTP intermediaries reject with 400.
+//
+// This test routes a POST with a non-trivial form-encoded body through
+// a debug-enabled client and asserts the server received the full body
+// AND the debug log contains the body. Both must hold simultaneously.
+func Test_Debug_DoesNotConsumeRequestBody(t *testing.T) {
+	const formBody = "GREETING=hello&TARGET=world&LOUD=true"
+
+	var receivedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("server: read body: %v", err)
+		}
+		receivedBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	var stderr strings.Builder
+	client, err := jenkins.New(jenkins.Options{Debug: true, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/job/demo/buildWithParameters", strings.NewReader(formBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedBody != formBody {
+		t.Errorf("server received body %q, want %q (debug logger consumed the body)", receivedBody, formBody)
+	}
+	if !strings.Contains(stderr.String(), formBody) {
+		t.Errorf("debug log should still contain request body for diagnostics, got: %q", stderr.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // context propagation
 // ---------------------------------------------------------------------------
