@@ -717,10 +717,127 @@ func Test_BuildMappers_RejectMalformedJSON(t *testing.T) {
 		"BuildStatus":  func(b []byte) error { _, err := schema.MapBuildStatus(b); return err },
 		"BuildStages":  func(b []byte) error { _, err := schema.MapBuildStages(b); return err },
 		"PendingInput": func(b []byte) error { _, err := schema.MapPendingInput(b); return err },
+		"BuildParams":  func(b []byte) error { _, err := schema.MapBuildParams(b); return err },
 	}
 	for name, fn := range cases {
 		if err := fn([]byte(`{not json`)); err == nil {
 			t.Errorf("%s: expected error on malformed JSON", name)
 		}
+	}
+}
+
+// extend-build-addressing §8.3: MapBuildParams walks actions[],
+// filters on _class == hudson.model.ParametersAction, and copies
+// name/value pairs into BuildParameter entries preserving Jenkins
+// declared order.
+func Test_MapBuildParams_TwoParameters(t *testing.T) {
+	raw := []byte(`{
+		"number":42,
+		"url":"http://example/job/svc/42/",
+		"actions":[
+			{"_class":"hudson.model.CauseAction"},
+			{"_class":"hudson.model.ParametersAction","parameters":[
+				{"_class":"hudson.model.StringParameterValue","name":"ENV","value":"prod"},
+				{"_class":"hudson.model.BooleanParameterValue","name":"DRY_RUN","value":false}
+			]}
+		]
+	}`)
+	got, err := schema.MapBuildParams(raw)
+	if err != nil {
+		t.Fatalf("MapBuildParams: %v", err)
+	}
+	if got.BuildNumber != 42 {
+		t.Errorf("BuildNumber: got %d want 42", got.BuildNumber)
+	}
+	if got.BuildURL != "http://example/job/svc/42/" {
+		t.Errorf("BuildURL: got %q", got.BuildURL)
+	}
+	if len(got.Parameters) != 2 {
+		t.Fatalf("Parameters: got %d want 2", len(got.Parameters))
+	}
+	if got.Parameters[0].Name != "ENV" || got.Parameters[0].Value != "prod" {
+		t.Errorf("Parameters[0]: %+v", got.Parameters[0])
+	}
+	if got.Parameters[1].Name != "DRY_RUN" || got.Parameters[1].Value != false {
+		t.Errorf("Parameters[1]: %+v", got.Parameters[1])
+	}
+}
+
+// No ParametersAction present -> empty slice, NOT error, NOT nil.
+func Test_MapBuildParams_NoParametersAction(t *testing.T) {
+	raw := []byte(`{
+		"number":3,
+		"url":"http://example/job/hello/3/",
+		"actions":[
+			{"_class":"hudson.model.CauseAction"},
+			{"_class":"jenkins.metrics.impl.TimeInQueueAction"}
+		]
+	}`)
+	got, err := schema.MapBuildParams(raw)
+	if err != nil {
+		t.Fatalf("MapBuildParams: %v", err)
+	}
+	if got.Parameters == nil {
+		t.Fatal("Parameters MUST be non-nil empty slice, got nil")
+	}
+	if len(got.Parameters) != 0 {
+		t.Errorf("Parameters: got %d want 0", len(got.Parameters))
+	}
+}
+
+// Redacted password/credentials parameters surface as value:null from
+// Jenkins; we MUST preserve that null faithfully (no empty-string
+// coercion, no omit).
+func Test_MapBuildParams_NullValuePreserved(t *testing.T) {
+	raw := []byte(`{
+		"number":7,
+		"url":"http://example/job/svc/7/",
+		"actions":[
+			{"_class":"hudson.model.ParametersAction","parameters":[
+				{"_class":"hudson.model.PasswordParameterValue","name":"API_TOKEN","value":null}
+			]}
+		]
+	}`)
+	got, err := schema.MapBuildParams(raw)
+	if err != nil {
+		t.Fatalf("MapBuildParams: %v", err)
+	}
+	if len(got.Parameters) != 1 || got.Parameters[0].Name != "API_TOKEN" {
+		t.Fatalf("unexpected: %+v", got.Parameters)
+	}
+	if got.Parameters[0].Value != nil {
+		t.Errorf("Value: want nil, got %#v", got.Parameters[0].Value)
+	}
+}
+
+// Multiple ParametersAction entries: last-write-wins on duplicates,
+// other names accumulate in encounter order.
+func Test_MapBuildParams_MultipleActionsLastWriteWins(t *testing.T) {
+	raw := []byte(`{
+		"number":9,
+		"url":"http://example/job/svc/9/",
+		"actions":[
+			{"_class":"hudson.model.ParametersAction","parameters":[
+				{"name":"ENV","value":"staging"},
+				{"name":"REGION","value":"us-east-1"}
+			]},
+			{"_class":"hudson.model.ParametersAction","parameters":[
+				{"name":"ENV","value":"prod"}
+			]}
+		]
+	}`)
+	got, err := schema.MapBuildParams(raw)
+	if err != nil {
+		t.Fatalf("MapBuildParams: %v", err)
+	}
+	values := map[string]any{}
+	for _, p := range got.Parameters {
+		values[p.Name] = p.Value
+	}
+	if values["ENV"] != "prod" {
+		t.Errorf("ENV: want prod (last-write-wins), got %v", values["ENV"])
+	}
+	if values["REGION"] != "us-east-1" {
+		t.Errorf("REGION: want us-east-1, got %v", values["REGION"])
 	}
 }

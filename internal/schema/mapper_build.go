@@ -339,3 +339,70 @@ func (d rawWfapiInputParam) toSchema() Parameter {
 	}
 	return p
 }
+
+// parametersActionClass is the Jenkins _class string we filter on when
+// walking actions[] for trigger-time parameter values. It is the only
+// piece of Jenkins-internal type-naming the BuildParams mapper depends
+// on (see extend-build-addressing design D8).
+const parametersActionClass = "hudson.model.ParametersAction"
+
+// MapBuildParams converts a build's `api/json?tree=number,url,actions[parameters[name,value]]`
+// response into a BuildParams. The mapper walks actions[], keeps only
+// entries whose _class == hudson.model.ParametersAction, and copies
+// each {name,value} pair into a BuildParameter in encounter order.
+//
+// Edge cases:
+//   - Absent ParametersAction (unparameterized builds): Parameters is
+//     an empty (non-nil) slice, not an error.
+//   - value: null (Jenkins-redacted password/credentials params):
+//     preserved verbatim as Go nil so the marshaler emits explicit
+//     `null` rather than empty string or omitting the field.
+//   - Multiple ParametersAction entries (rare; some plugin chains):
+//     merged with last-write-wins semantics on duplicate names,
+//     matching Jenkins' own behavior.
+func MapBuildParams(raw []byte) (*BuildParams, error) {
+	var src struct {
+		Number  int    `json:"number"`
+		URL     string `json:"url"`
+		Actions []struct {
+			Class      string `json:"_class"`
+			Parameters []struct {
+				Name  string `json:"name"`
+				Value any    `json:"value"`
+			} `json:"parameters"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(raw, &src); err != nil {
+		return nil, fmt.Errorf("MapBuildParams: %w", err)
+	}
+
+	out := &BuildParams{
+		BuildURL:    src.URL,
+		BuildNumber: src.Number,
+		Parameters:  []BuildParameter{}, // never nil, even when empty
+	}
+
+	// First pass: index entries in encounter order so we can implement
+	// last-write-wins on duplicates without losing the original
+	// position of the first occurrence. We track {name -> slice index}.
+	idxByName := map[string]int{}
+	for _, a := range src.Actions {
+		if a.Class != parametersActionClass {
+			continue
+		}
+		for _, p := range a.Parameters {
+			if existing, ok := idxByName[p.Name]; ok {
+				// Last-write-wins: overwrite the value at the
+				// existing position; preserve original ordering.
+				out.Parameters[existing].Value = p.Value
+				continue
+			}
+			idxByName[p.Name] = len(out.Parameters)
+			out.Parameters = append(out.Parameters, BuildParameter{
+				Name:  p.Name,
+				Value: p.Value,
+			})
+		}
+	}
+	return out, nil
+}
