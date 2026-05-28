@@ -163,6 +163,8 @@ With `--watch`, the command does not emit a final structured response — exit c
 
 Returns the current state of a build.
 
+The `<url>` may address the build by numeric build number (`/job/svc/42/`) or by any of the seven Jenkins permalinks (`lastBuild`, `lastCompletedBuild`, `lastSuccessfulBuild`, `lastUnsuccessfulBuild`, `lastFailedBuild`, `lastStableBuild`, `lastUnstableBuild`). Permalinks are resolved server-side by Jenkins; the `buildNumber` field in the output always reflects the resolved numeric build.
+
 | Field | Type | Tier | Description |
 |---|---|---|---|
 | `buildUrl` | `string` | `stable` | Canonical Jenkins URL of the build. |
@@ -181,7 +183,7 @@ Returns the current state of a build.
 PendingInput:
   id: string                       # experimental
   message: string                  # experimental
-  ok: string                       # experimental — label of the "proceed" button; also the value of the `proceed` form field that `jk build input` sends to the submit endpoint (§3.9)
+  ok: string                       # experimental — label of the "proceed" button; also the value of the `proceed` form field that `jk build input` sends to the submit endpoint (§3.10)
   parameters: Parameter[]          # stable — input-step parameters (reuses §3.4 shape); consumed by `jk build input -p` validation
 ```
 
@@ -192,7 +194,31 @@ PendingInput:
 3. The core marker is present but wfapi returns an empty list (input was submitted between the two HTTP calls, or enrichment failed) → `RUNNING`, `pendingInput` omitted.
 4. Otherwise → `RUNNING`.
 
-### 3.8 `jk build stages <url>`
+### 3.8 `jk build params <url>`
+
+Returns the parameter **values** that were recorded on a specific build, in contrast to `jk pipeline params` which returns the parameter **definitions** of the pipeline.
+
+The `<url>` may address the build by numeric build number or by any of the seven Jenkins permalinks (see §3.7). The `buildNumber` and `buildUrl` fields always reflect the resolved numeric build.
+
+| Field | Type | Tier | Description |
+|---|---|---|---|
+| `buildUrl` | `string` | `stable` | Canonical Jenkins URL of the build (numeric form, even when the request used a permalink). |
+| `buildNumber` | `integer` | `stable` | Build number. |
+| `parameters` | `BuildParameter[]` | `stable` | Parameters recorded on this build, in Jenkins-declared order. Empty array if the build was unparameterized or carried no `ParametersAction`. |
+
+```yaml
+BuildParameter:
+  name: string                       # stable
+  value: string | boolean | null     # stable — natural JSON type as recorded by Jenkins; null for password/credentials parameters whose values Jenkins redacts
+```
+
+Notes:
+
+- `BuildParameter` is intentionally distinct from the `Parameter` shape in §3.4: definitions describe what a pipeline accepts (type, default, choices, description), while build parameters record what a specific run was given (name + recorded value only).
+- When a build's `actions[]` contains multiple `ParametersAction` entries (rare but possible with plugins that inject parameters mid-run), entries are merged **last-write-wins** by `name`; the first occurrence's position in the output array is preserved.
+- `value: null` is preserved verbatim for `PasswordParameterValue` and credentials parameters, where Jenkins refuses to disclose the recorded secret. Consumers can distinguish "no value" from "value present but redacted" only by consulting the pipeline's parameter definitions via `jk pipeline params`.
+
+### 3.9 `jk build stages <url>`
 
 Returns the pipeline run's stage tree.
 
@@ -214,7 +240,7 @@ Stage:
 
 This entire section is `experimental` until the wfapi spike (tasks 1.1, 1.3) confirms the real shape against parallel pipelines.
 
-### 3.9 `jk build input <url> proceed|abort`
+### 3.10 `jk build input <url> proceed|abort`
 
 Submits a `proceed` or `abort` response to a paused Pipeline input step. When the build has exactly one pending input, the command operates on that input by default; when two or more are pending, `--input-id <id>` is required.
 
@@ -250,7 +276,7 @@ Returns confirmation that the input was submitted:
 
 `InputAction` enum (`experimental`): `PROCEED`, `ABORT`.
 
-### 3.10 `jk build logs <url>`
+### 3.11 `jk build logs <url>`
 
 This command streams plain text to stdout. It is **not** wrapped in the jk schema; consumers should treat the output as opaque log bytes. `schemaVersion` is **not** injected. `-o json` and `-o yaml` behave identically to `-o raw` for this command (all three stream raw log text).
 
@@ -295,11 +321,11 @@ See §3.5.
 
 ### `StageStatus` (`experimental`)
 
-See §3.8.
+See §3.9.
 
 ### `InputAction` (`experimental`)
 
-See §3.9.
+See §3.10.
 
 ---
 
@@ -311,7 +337,7 @@ Every field referenced by any `openspec/changes/init-jk-jenkins-cli/specs/**/*.m
 |---|---|
 | `specs/auth/spec.md` | §3.1, §3.2 |
 | `specs/pipeline/spec.md` | §3.3, §3.4, §3.5 |
-| `specs/build/spec.md` | §3.6, §3.7, §3.8, §3.9, §3.10 |
+| `specs/build/spec.md` | §3.6, §3.7, §3.8, §3.9, §3.10, §3.11 |
 | `specs/output/spec.md` | §1, §2 |
 | `specs/url-resolution/spec.md` | (no response shape; URL handling is internal) |
 | `specs/tls-and-transport/spec.md` | (no response shape; transport-level behavior) |
