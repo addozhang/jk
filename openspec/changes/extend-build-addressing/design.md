@@ -13,7 +13,7 @@ This change bundles two related additions to how `jk` addresses builds.
 - Preserve URL-as-identity: a permalink URL stays a permalink until an HTTP round-trip resolves it; the parsed `Ref` is enough to format every downstream API URL.
 - Keep the parser pure and offline.
 - Add a `jk build params <build-url>` command that returns trigger-time parameter values for a specific build, with permalink URLs accepted automatically.
-- Reuse the existing `Parameter` schema struct so users see one consistent parameter model across `pipeline params` and `build params`.
+- Introduce a dedicated `BuildParameter {name, value}` schema struct for trigger-time submitted values, distinct from the existing `Parameter` struct (which describes parameter *definitions*: type/default/choices/description). Reusing `Parameter` would force its `Default` field to carry submitted values, producing the misleading wire shape `default: prod` for a value the user actually passed at trigger time. Symmetry between `pipeline params` (definitions) and `build params` (values) lives at the command level, not in a shared element struct.
 - Existing numeric-build and bare-job URLs continue to behave bit-identically.
 
 **Non-Goals:**

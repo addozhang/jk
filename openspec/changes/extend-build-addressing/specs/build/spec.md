@@ -22,7 +22,7 @@ The system SHALL allow build-scoped commands (`build status`, `build stages`, `b
 
 ### Requirement: Return parameter values used to trigger a specific build
 
-The system SHALL provide a `jk build params <build-url>` command that returns the trigger-time parameter values of the specified build as a `BuildParams` payload (`{schemaVersion, buildUrl, buildNumber, parameters[]}`). The `parameters` field MUST reuse the same `Parameter` shape returned by `jk pipeline params`. Builds with no parameters MUST return an empty `parameters` array, not an error. Parameter values that Jenkins reports as null (e.g. redacted password / credentials parameters) MUST be preserved as null in the output.
+The system SHALL provide a `jk build params <build-url>` command that returns the trigger-time parameter values of the specified build as a `BuildParams` payload (`{schemaVersion, buildUrl, buildNumber, parameters[]}`). Each `parameters[]` entry MUST be a `BuildParameter` object with the shape `{name: string, value: string|boolean|null}` — distinct from the `Parameter` shape returned by `jk pipeline params` (which describes parameter *definitions*: type, default, choices, description), because `build params` reports the *submitted values* of one specific build. Builds with no parameters MUST return an empty `parameters` array, not an error. Parameter values that Jenkins reports as null (e.g. redacted password / credentials parameters) MUST be preserved as null in the output.
 
 #### Scenario: Build with parameters
 - **WHEN** the user runs `jk build params http://jenkins.foo.com/job/svc/42/` against a build triggered with `ENV=prod` and `DRY_RUN=false`
