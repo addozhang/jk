@@ -235,6 +235,120 @@ func Test_Client_GetBuildStatus_RequiresBuildNumber(t *testing.T) {
 	}
 }
 
+// When a Ref carries a BuildPermalink, GetBuildStatus MUST issue the
+// status request against `<permalink>/api/json` directly (no tree-query
+// pre-flight) and let Jenkins resolve the permalink server-side.
+func Test_Client_GetBuildStatus_AcceptsPermalink(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+
+	var hits []string
+	rec.handle("/job/svc/lastSuccessfulBuild/api/json", func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"number":17,"building":false,"result":"SUCCESS","url":"` + srv.URL + `/job/svc/17/"}`))
+	})
+	// Detect any accidental pre-flight against /job/svc/api/json.
+	rec.handle("/job/svc/api/json", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected pre-flight tree query: %s?%s", r.URL.Path, r.URL.RawQuery)
+		http.Error(w, "no", http.StatusInternalServerError)
+	})
+
+	ref := mustParseRef(t, srv.URL+"/job/svc/lastSuccessfulBuild/")
+	body, err := client.GetBuildStatus(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("GetBuildStatus: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Errorf("expected exactly one permalink fetch, got %d (%v)", len(hits), hits)
+	}
+	if !strings.Contains(string(body), `"number":17`) {
+		t.Errorf("body missing resolved build number: %s", body)
+	}
+}
+
+// A 404 on a permalink path (e.g. no successful build yet) must surface
+// as a normal HTTP error, not a synthetic "never built" message.
+func Test_Client_GetBuildStatus_PermalinkNotFoundSurfacesHTTPError(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+	rec.handle("/job/svc/lastSuccessfulBuild/api/json", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+
+	ref := mustParseRef(t, srv.URL+"/job/svc/lastSuccessfulBuild/")
+	_, err := client.GetBuildStatus(context.Background(), ref)
+	if err == nil {
+		t.Fatal("expected error on 404")
+	}
+	// We should NOT mention "lastBuild" or claim the pipeline has no builds —
+	// that copy is reserved for ResolveLastBuild's never-built case.
+	if strings.Contains(err.Error(), "has no builds yet") {
+		t.Errorf("unexpected friendly never-built copy on permalink 404: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 9.x GetBuildParams (extend-build-addressing)
+// ---------------------------------------------------------------------------
+
+// GetBuildParams MUST issue a tree-filtered request for
+// number,url,actions[parameters[name,value]] so the response is
+// scoped to exactly the fields MapBuildParams reads.
+func Test_Client_GetBuildParams_Numeric(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+	rec.handle("/job/svc/42/api/json", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.RawQuery
+		for _, want := range []string{"tree=", "number", "url", "actions", "parameters", "name", "value"} {
+			if !strings.Contains(q, want) {
+				t.Errorf("tree query missing %q: %s", want, q)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"number":42,"url":"x","actions":[]}`))
+	})
+
+	ref := mustParseRef(t, srv.URL+"/job/svc/42/")
+	if _, err := client.GetBuildParams(context.Background(), ref); err != nil {
+		t.Fatalf("GetBuildParams: %v", err)
+	}
+}
+
+// Permalink synergy: GetBuildParams against a permalink Ref hits
+// <permalink>/api/json directly (no pre-flight tree=lastBuild lookup),
+// just like GetBuildStatus.
+func Test_Client_GetBuildParams_Permalink(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+
+	var hits []string
+	rec.handle("/job/svc/lastSuccessfulBuild/api/json", func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"number":17,"url":"x","actions":[]}`))
+	})
+	rec.handle("/job/svc/api/json", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected pre-flight tree query: %s?%s", r.URL.Path, r.URL.RawQuery)
+		http.Error(w, "no", http.StatusInternalServerError)
+	})
+
+	ref := mustParseRef(t, srv.URL+"/job/svc/lastSuccessfulBuild/")
+	if _, err := client.GetBuildParams(context.Background(), ref); err != nil {
+		t.Fatalf("GetBuildParams: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Errorf("expected exactly one permalink fetch, got %d (%v)", len(hits), hits)
+	}
+}
+
+// GetBuildParams MUST refuse a Ref with neither BuildNumber nor
+// BuildPermalink (same gating as GetBuildStatus). Falling back to
+// lastBuild silently would surprise the caller in the same way.
+func Test_Client_GetBuildParams_RequiresBuildAddress(t *testing.T) {
+	client, _, srv := newClientAgainst(t)
+	ref := mustParseRef(t, srv.URL+"/job/svc")
+	if _, err := client.GetBuildParams(context.Background(), ref); err == nil {
+		t.Fatal("expected error when Ref carries neither BuildNumber nor BuildPermalink")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 11.12 ResolveLastBuild
 // ---------------------------------------------------------------------------

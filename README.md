@@ -56,6 +56,9 @@ jk build logs https://jenkins.example.com/job/my-folder/job/my-pipeline/lastBuil
 # 5. Respond to a paused input step with parameter values
 jk build input https://jenkins.example.com/job/deploy/42 proceed \
     -p ENV=prod -p DRY_RUN=false
+
+# 6. Inspect the parameter values a build was triggered with
+jk build params https://jenkins.example.com/job/my-pipeline/lastSuccessfulBuild
 ```
 
 ## First-time setup
@@ -93,6 +96,8 @@ Pass `--insecure` only as a last resort; it disables all certificate verificatio
 | `https://host/job/pipeline/42` | specific build #42 |
 | `https://host/job/pipeline/lastBuild` | symbolic last build |
 | `https://host/job/folder/` | folder (for `pipeline list`) |
+
+Any of the seven Jenkins build permalinks may appear in the build-position slot in place of a numeric build number: `lastBuild`, `lastCompletedBuild`, `lastSuccessfulBuild`, `lastUnsuccessfulBuild`, `lastFailedBuild`, `lastStableBuild`, `lastUnstableBuild`. Jenkins resolves them server-side; `jk` output always records the resolved numeric `buildNumber`.
 
 Normalisation rules:
 - Trailing slashes are stripped.

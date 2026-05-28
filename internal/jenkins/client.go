@@ -107,16 +107,41 @@ func (c *Client) ListPipelinesInFolder(ctx context.Context, ref *jenkinsurl.Ref)
 	return c.getJSON(ctx, ref.APIPath("api/json"), tree)
 }
 
-// GetBuildStatus fetches `<ref>/<buildNumber>/api/json`. The caller
-// MUST resolve a build number first; we refuse a Ref with
-// BuildNumber == 0 because silently falling back to lastBuild would
-// hide a "the build I just triggered hasn't started" race from the
-// caller of build status commands.
+// GetBuildStatus fetches `<ref>/<build>/api/json` where `<build>` is
+// either a numeric build number or a Jenkins permalink name
+// (e.g. `lastSuccessfulBuild`). The caller MUST supply one of the
+// two; we refuse a Ref with neither because silently falling back
+// to `lastBuild` would hide a "the build I just triggered hasn't
+// started" race from the caller of build status commands.
+//
+// When a permalink is supplied we skip the `lastBuild[number]`
+// pre-flight entirely and let Jenkins resolve the permalink
+// server-side; a 404 (e.g. `lastSuccessfulBuild` on a pipeline that
+// has only failed builds) surfaces as the underlying HTTP error
+// rather than being masked as "has no builds yet".
 func (c *Client) GetBuildStatus(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error) {
-	if ref.BuildNumber == 0 {
-		return nil, errors.New("jenkins: GetBuildStatus requires a Ref with a non-zero BuildNumber; call ResolveLastBuild first")
+	if ref.BuildNumber == 0 && ref.BuildPermalink == "" {
+		return nil, errors.New("jenkins: GetBuildStatus requires a Ref with a non-zero BuildNumber or a BuildPermalink; call ResolveLastBuild first")
 	}
 	return c.getJSON(ctx, ref.APIPath("api/json"), "")
+}
+
+// GetBuildParams fetches the trigger-time parameter values of a
+// specific build via `<ref>/<build>/api/json?tree=number,url,actions[parameters[name,value]]`.
+// The tree filter scopes the response to exactly what MapBuildParams
+// reads, keeping the payload small even on builds with massive
+// actions[] arrays from chatty plugins.
+//
+// Like GetBuildStatus, this method refuses a Ref that addresses
+// neither a numeric build nor a permalink, and skips the
+// `tree=lastBuild[number]` pre-flight entirely when a permalink is
+// supplied (Jenkins resolves permalinks server-side).
+func (c *Client) GetBuildParams(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error) {
+	if ref.BuildNumber == 0 && ref.BuildPermalink == "" {
+		return nil, errors.New("jenkins: GetBuildParams requires a Ref with a non-zero BuildNumber or a BuildPermalink")
+	}
+	const tree = "number,url,actions[parameters[name,value]]"
+	return c.getJSON(ctx, ref.APIPath("api/json"), tree)
 }
 
 // ResolveLastBuild returns the build number of the pipeline's most
