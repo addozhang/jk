@@ -1,27 +1,27 @@
 ## 1. Spike & validation (do first — kill or scope down before broad work)
 
-- [ ] 1.1 Spike: call `/wfapi/runs/{id}/describe` against a real running pipeline; confirm stage tree shape including parallel branches and capture two real samples in `docs/spikes/wfapi-stages/`
-- [ ] 1.2 Spike: trigger a pipeline with a Pipeline `input` step; identify the exact submit endpoint, payload shape, and input-id semantics; capture in `docs/spikes/wfapi-input/`
-- [ ] 1.3 Spike: fetch per-stage logs via `wfapi` against a multi-stage build; capture endpoint + truncation behavior in `docs/spikes/wfapi-logs/`
-- [ ] 1.4 Collect 10 real Jenkins URLs (top-level, folders, multibranch, with/without build numbers, with/without trailing slashes) into `docs/spikes/urls.txt` for parser conformance testing
-- [ ] 1.5 Decision review: if any spike reveals a blocker, update `design.md` and re-scope the affected requirements before continuing
+- [x] 1.1 Spike: call `/wfapi/runs/{id}/describe` against a real running pipeline; confirm stage tree shape including parallel branches and capture two real samples in `docs/spikes/wfapi-stages/`
+- [x] 1.2 Spike: trigger a pipeline with a Pipeline `input` step; identify the exact submit endpoint, payload shape, and input-id semantics; capture in `docs/spikes/wfapi-input/`
+- [x] 1.3 Spike: fetch per-stage logs via `wfapi` against a multi-stage build; capture endpoint + truncation behavior in `docs/spikes/wfapi-logs/`
+- [x] 1.4 Collect 10 real Jenkins URLs (top-level, folders, multibranch, with/without build numbers, with/without trailing slashes) into `docs/spikes/urls.txt` for parser conformance testing
+- [x] 1.5 Decision review: if any spike reveals a blocker, update `design.md` and re-scope the affected requirements before continuing
 
 ## 2. Project scaffolding
 
-- [ ] 2.1 Initialize Go module (`go mod init github.com/addozhang/jk`), set Go version, commit `.gitignore`
-- [ ] 2.2 Create directory skeleton: `cmd/jk/`, `internal/cli/`, `internal/jenkins/`, `internal/jenkinsurl/`, `internal/auth/`, `internal/schema/`, `internal/output/`, `internal/errors/`, `docs/`
-- [ ] 2.3 Add dependencies: `spf13/cobra`, `sigs.k8s.io/yaml`, `BurntSushi/toml`
-- [ ] 2.4 Wire root `cmd/jk/main.go` with Cobra root command + global flags (`-o/--output`, `--insecure`, `--timeout`, `--debug`) and `jk version` subcommand
-- [ ] 2.5 Add Makefile / `justfile` with `build`, `test`, `lint`, `release-snapshot` targets
-- [ ] 2.6 Configure linter (`golangci-lint`) and pre-commit hooks
+- [x] 2.1 Initialize Go module (`go mod init github.com/addozhang/jk`), set Go version, commit `.gitignore`
+- [x] 2.2 Create directory skeleton: `cmd/jk/`, `internal/cli/`, `internal/jenkins/`, `internal/jenkinsurl/`, `internal/auth/`, `internal/schema/`, `internal/output/`, `internal/errors/`, `docs/`
+- [x] 2.3 Add dependencies: `spf13/cobra`, `sigs.k8s.io/yaml`, `BurntSushi/toml`
+- [x] 2.4 Wire root `cmd/jk/main.go` with Cobra root command + global flags (`-o/--output`, `--insecure`, `--timeout`, `--debug`) and `jk version` subcommand
+- [x] 2.5 Add Makefile / `justfile` with `build`, `test`, `lint`, `release-snapshot` targets
+- [x] 2.6 Configure linter (`golangci-lint`) and pre-commit hooks
 
 ## 3. Schema documentation (the public contract — write before code)
 
-- [ ] 3.1 Create `docs/schema.md` §1: versioning policy (semver-style rules for `schemaVersion` bumps; what counts as breaking)
-- [ ] 3.2 `docs/schema.md` §2: field conventions (camelCase, `Ms` and `Utc` suffixes, uppercase enums, explicit `null`, stable/experimental tagging)
-- [ ] 3.3 `docs/schema.md` §3: full schema for every MVP command response (every field, type, stability tier, one-line description)
-- [ ] 3.4 `docs/schema.md` §4: enum value catalog (`SUCCESS`, `FAILURE`, `ABORTED`, `UNSTABLE`, `RUNNING`, `QUEUED`, `PENDING_INPUT`, `DONE`) with semantics
-- [ ] 3.5 Cross-check: every field referenced in any spec scenario appears in `docs/schema.md`
+- [x] 3.1 Create `docs/schema.md` §1: versioning policy (semver-style rules for `schemaVersion` bumps; what counts as breaking)
+- [x] 3.2 `docs/schema.md` §2: field conventions (camelCase, `Ms` and `Utc` suffixes, uppercase enums, explicit `null`, stable/experimental tagging)
+- [x] 3.3 `docs/schema.md` §3: full schema for every MVP command response (every field, type, stability tier, one-line description)
+- [x] 3.4 `docs/schema.md` §4: enum value catalog (`SUCCESS`, `FAILURE`, `ABORTED`, `UNSTABLE`, `RUNNING`, `QUEUED`, `PENDING_INPUT`, `DONE`) with semantics
+- [x] 3.5 Cross-check: every field referenced in any spec scenario appears in `docs/schema.md`
 
 ## 4. URL resolution (`internal/jenkinsurl/`)
 
@@ -71,7 +71,7 @@
 - [x] 9.1 Implement `Render(v any, format string) ([]byte, error)` supporting `yaml` (default), `json`, and `raw` (passthrough `[]byte`)
 - [x] 9.2 Inject `schemaVersion: "1"` as the first key for `yaml` and `json` formats; omit for `raw`
 - [x] 9.3 Configure marshaling to emit `null` for `nil` values (no `omitempty`) on all schema types
-- [ ] 9.4 Validate enum string values at marshal time (assert uppercase, no typos) via a small helper
+- [ ] 9.4 Validate enum string values at marshal time (assert uppercase, no typos) via a small helper — DEFERRED (post-v0.2): all enums are typed string constants under `internal/schema`, and the few call sites are covered by unit tests. A marshal-time validator would be belt-and-suspenders; revisit if a regression slips through.
 - [x] 9.5 Unit tests covering all three formats, schemaVersion ordering, and null handling
 
 ## 10. Schema types (`internal/schema/`)
@@ -80,7 +80,7 @@
 - [x] 10.2 Define enum constants for `BuildResult`, `BuildState` (uppercase strings)
 - [x] 10.3 Add struct tags for both `yaml` and `json` ensuring identical output
 - [x] 10.4 Add doc comments per field that mirror the `docs/schema.md` description (sets up future `jk explain` generation)
-- [ ] 10.5 Compile-time check: every schema field is referenced by exactly one command
+- [ ] 10.5 Compile-time check: every schema field is referenced by exactly one command — DEFERRED (post-v0.2): manual cross-check in `docs/schema.md §3` is current. An automated checker would need a code-generator pass over both CLI and schema packages; not worth the build complexity until schema growth makes manual review error-prone.
 
 ## 11. Jenkins API client (`internal/jenkins/client.go`)
 
