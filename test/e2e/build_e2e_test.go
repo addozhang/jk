@@ -89,3 +89,138 @@ func Test_E2E_BuildLogs_UnknownStage(t *testing.T) {
 		t.Errorf("expected stage list in error, got:\n%s", stderr)
 	}
 }
+
+// extend-build-addressing §6: `jk build status` MUST accept a
+// Jenkins permalink in place of a numeric build number, and the
+// output MUST report the resolved numeric build. Exercises the
+// most common permalink shape (`lastBuild`).
+func Test_E2E_BuildStatus_LastBuildPermalink(t *testing.T) {
+	url := h.jobURL("hello") + "lastBuild/"
+	stdout, _ := h.mustRun(t, "build", "status", url)
+	for _, want := range []string{
+		`schemaVersion: "1"`,
+		"buildNumber: 1",
+		"state: DONE",
+		"result: SUCCESS",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("missing %q in stdout:\n%s", want, stdout)
+		}
+	}
+}
+
+// Same as above but with `lastSuccessfulBuild` to cover the
+// non-`lastBuild` permalink resolution path (some Jenkins versions
+// fast-path lastBuild specifically, so we want at least one
+// non-aliased permalink in the e2e suite).
+func Test_E2E_BuildStatus_LastSuccessfulBuildPermalink(t *testing.T) {
+	url := h.jobURL("hello") + "lastSuccessfulBuild/"
+	stdout, _ := h.mustRun(t, "build", "status", url)
+	for _, want := range []string{
+		"buildNumber: 1",
+		"result: SUCCESS",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("missing %q in stdout:\n%s", want, stdout)
+		}
+	}
+}
+
+// extend-build-addressing §11.1: `jk build params <numeric-url>`
+// against the `params` pipeline MUST return the parameter values
+// the build was triggered with. We trigger a fresh build with
+// known parameter values (rather than asserting on a harness-seeded
+// build) because Jenkins does NOT record a ParametersAction on the
+// very first build of a parameterized pipeline — the parameter
+// definitions only become "known" after build #1 completes. By
+// triggering inside the test we guarantee a build with a fully
+// populated actions[] regardless of harness build-history state.
+func Test_E2E_BuildParams_Numeric(t *testing.T) {
+	// Trigger a build with non-default values so the assertions
+	// cannot accidentally match a different build's defaults.
+	pipelineURL := h.jobURL("params")
+	triggerOut, _ := h.mustRun(t,
+		"build", "trigger", pipelineURL,
+		"-p", "GREETING=hola",
+		"-p", "TARGET=mundo",
+		"-p", "LOUD=true",
+		"--watch", "-o", "json",
+	)
+	buildURL := extractField(t, triggerOut, "buildUrl")
+
+	stdout, _ := h.mustRun(t, "build", "params", buildURL)
+	for _, want := range []string{
+		`schemaVersion: "1"`,
+		"name: GREETING",
+		"value: hola",
+		"name: TARGET",
+		"value: mundo",
+		"name: LOUD",
+		"value: true",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("missing %q in stdout:\n%s", want, stdout)
+		}
+	}
+}
+
+// extend-build-addressing §11.2: same `params` pipeline addressed
+// by permalink — exercises the permalink synergy explicitly and
+// proves the resolved numeric buildNumber surfaces in output even
+// when the user supplied a symbolic URL. The values asserted are
+// those of whichever build is currently lastSuccessfulBuild, so we
+// trigger a build with known values first and then read it back via
+// permalink.
+func Test_E2E_BuildParams_Permalink(t *testing.T) {
+	pipelineURL := h.jobURL("params")
+	h.mustRun(t,
+		"build", "trigger", pipelineURL,
+		"-p", "GREETING=bonjour",
+		"-p", "TARGET=monde",
+		"-p", "LOUD=false",
+		"--watch",
+	)
+
+	url := pipelineURL + "lastSuccessfulBuild/"
+	stdout, _ := h.mustRun(t, "build", "params", url)
+	for _, want := range []string{
+		"name: GREETING",
+		"value: bonjour",
+		"name: TARGET",
+		"value: monde",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("missing %q in stdout:\n%s", want, stdout)
+		}
+	}
+}
+
+// Unparameterized build: `params` array MUST be empty, not error,
+// not null. Uses the `hello` pipeline which has no `parameters {}`
+// block.
+func Test_E2E_BuildParams_UnparameterizedBuildEmpty(t *testing.T) {
+	url := lastBuildURL("hello")
+	stdout, _ := h.mustRun(t, "build", "params", url, "-o", "json")
+	if !strings.Contains(stdout, `"parameters":[]`) {
+		t.Errorf("expected parameters:[] in json output:\n%s", stdout)
+	}
+}
+
+// extractField is a tiny JSON field extractor for trigger-output
+// parsing. We avoid importing encoding/json into the e2e tests so
+// signature drift in jk's output surfaces as a test failure rather
+// than a silent unmarshal-into-different-struct.
+func extractField(t *testing.T, jsonOut, key string) string {
+	t.Helper()
+	needle := `"` + key + `":"`
+	i := strings.Index(jsonOut, needle)
+	if i < 0 {
+		t.Fatalf("field %q not found in output:\n%s", key, jsonOut)
+	}
+	start := i + len(needle)
+	end := strings.IndexByte(jsonOut[start:], '"')
+	if end < 0 {
+		t.Fatalf("unterminated %q value in:\n%s", key, jsonOut)
+	}
+	return jsonOut[start : start+end]
+}

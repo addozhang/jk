@@ -277,6 +277,41 @@ type PendingInput struct {
 }
 
 // ---------------------------------------------------------------------------
+// Build params (docs/schema.md §3.x — extend-build-addressing)
+// ---------------------------------------------------------------------------
+
+// BuildParams is the response of `jk build params`. It reports the
+// trigger-time parameter values of one specific build (NOT parameter
+// definitions — those live on PipelineParams). Stability: stable.
+type BuildParams struct {
+	// BuildURL is the canonical Jenkins URL of the build.
+	BuildURL string `json:"buildUrl"`
+	// BuildNumber is the resolved numeric build number (always
+	// numeric, even when the user addressed the build by permalink).
+	BuildNumber int `json:"buildNumber"`
+	// Parameters lists the submitted values in Jenkins-declared order.
+	// Empty array when the build was triggered without parameters;
+	// never null.
+	Parameters []BuildParameter `json:"parameters"`
+}
+
+// BuildParameter is one trigger-time parameter value. Deliberately
+// distinct from Parameter (which describes a definition: type,
+// default, choices, description). A BuildParameter only carries the
+// name + submitted value, mirroring what Jenkins records under
+// `actions[].parameters[]`. Stability: stable.
+type BuildParameter struct {
+	// Name is the parameter name.
+	Name string `json:"name"`
+	// Value is the submitted value. Modeled as `any` so the marshaler
+	// emits the natural JSON shape (string/boolean/null). Jenkins
+	// reports `null` for redacted password/credentials parameters
+	// regardless of caller permissions; that null MUST be preserved
+	// here (see extend-build-addressing design Risk).
+	Value any `json:"value"`
+}
+
+// ---------------------------------------------------------------------------
 // Build stages (docs/schema.md §3.8)
 // ---------------------------------------------------------------------------
 

@@ -52,6 +52,7 @@ func newBuildCommand(flags *GlobalFlags) *cobra.Command {
 	cmd.AddCommand(
 		newBuildTriggerCommand(flags),
 		newBuildStatusCommand(flags),
+		newBuildParamsCommand(flags),
 		newBuildStagesCommand(flags),
 		newBuildInputCommand(flags),
 		newBuildLogsCommand(flags),
@@ -309,6 +310,58 @@ func enrichPendingInput(ctx context.Context, cc *commandContext, ref *jenkinsurl
 		return nil, err
 	}
 	return schema.MapPendingInput(raw)
+}
+
+// ---------------------------------------------------------------------------
+// jk build params <build-url>
+// ---------------------------------------------------------------------------
+
+func newBuildParamsCommand(flags *GlobalFlags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "params <build-url>",
+		Short: "Show the trigger-time parameter values of a build",
+		Long: `Fetch the parameter values used to trigger the build at <build-url>
+and emit them as a BuildParams payload.
+
+Builds with no parameters return an empty parameters array (not an
+error). Password / credentials parameters surface as value: null
+because Jenkins redacts those server-side and never returns the
+actual value, regardless of caller permissions.
+
+The <build-url> may use a numeric build number or any Jenkins
+permalink (lastBuild, lastSuccessfulBuild, etc.); the resolved
+numeric build number appears in the output's buildNumber field.
+
+Example:
+  jk build params https://jenkins.example.com/job/svc/lastSuccessfulBuild/`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBuildParams(cmd, flags, args[0])
+		},
+	}
+}
+
+func runBuildParams(cmd *cobra.Command, flags *GlobalFlags, rawURL string) error {
+	ref, err := resolveBuildRef(rawURL)
+	if err != nil {
+		return err
+	}
+	cc, err := newCommandContext(cmd, flags)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cc.withTimeout(cmd.Context())
+	defer cancel()
+
+	body, err := cc.client.GetBuildParams(ctx, ref)
+	if err != nil {
+		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
+	}
+	params, err := schema.MapBuildParams(body)
+	if err != nil {
+		return jkerrors.NewMalformedResponse(ref.Host, err)
+	}
+	return cc.render(params)
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,21 +1130,23 @@ func buildResultToExit(result *schema.BuildResult) error {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-// resolveBuildRef is like resolveRef but also rejects URLs without a
-// trailing build number. Build commands operating on a specific run
-// MUST receive an addressable build, not a pipeline URL — silently
-// falling back to lastBuild would mask "I forgot the build number"
-// typos with stale data.
+// resolveBuildRef is like resolveRef but also rejects URLs that do
+// not address a specific build — either by numeric build number or
+// by a Jenkins permalink (lastBuild, lastSuccessfulBuild, etc.).
+// Build commands operating on a specific run MUST receive an
+// addressable build, not a bare pipeline URL — silently falling back
+// to lastBuild would mask "I forgot the build number" typos with
+// stale data.
 func resolveBuildRef(rawURL string) (*jenkinsurl.Ref, error) {
 	ref, err := resolveRef(rawURL)
 	if err != nil {
 		return nil, err
 	}
-	if ref.BuildNumber == 0 {
+	if ref.BuildNumber == 0 && ref.BuildPermalink == "" {
 		return nil, &jkerrors.JKError{
 			Code:       "missing_build_number",
-			Message:    fmt.Sprintf("URL %s does not include a build number.", rawURL),
-			Suggestion: "Append the build number, e.g. .../job/svc/42/",
+			Message:    fmt.Sprintf("URL %s does not include a build number or permalink.", rawURL),
+			Suggestion: "Append the build number (.../job/svc/42/) or a permalink (.../job/svc/lastSuccessfulBuild/).",
 		}
 	}
 	return ref, nil
@@ -1106,6 +1161,7 @@ type buildClientSurface interface {
 	TriggerBuild(ctx context.Context, ref *jenkinsurl.Ref, params map[string]string) (string, error)
 	ResolveQueueItem(ctx context.Context, queueURL string, timeout time.Duration) (string, int, error)
 	GetBuildStatus(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
+	GetBuildParams(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetBuildStages(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetPendingInputs(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, proceedText, proceedURL string, parameters []jenkins.InputParameterValue) error
