@@ -405,6 +405,41 @@ func Test_BuildStatus_MissingBuildNumber(t *testing.T) {
 	}
 }
 
+// extend-build-addressing §4: `jk build status` MUST accept a Jenkins
+// permalink (e.g. lastSuccessfulBuild) in the build-position slot,
+// pass it through to Jenkins without any pre-flight lastBuild lookup,
+// and surface the resolved numeric build returned by the server in
+// the output. This pins both the CLI gate (resolveBuildRef) and the
+// client (GetBuildStatus) to the permalink contract.
+func Test_BuildStatus_AcceptsPermalink(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/lastSuccessfulBuild/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":7,"url":"http://example/job/svc/7/",
+				"building":false,"result":"SUCCESS",
+				"timestamp":1700000000000,
+				"duration":45000,"estimatedDuration":60000,
+				"actions":[]
+			}`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "status", srv.URL + "/job/svc/lastSuccessfulBuild/"})
+	if err != nil {
+		t.Fatalf("build status (permalink): %v", err)
+	}
+	for _, want := range []string{
+		"buildNumber: 7",
+		"state: DONE",
+		"result: SUCCESS",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 // Scenario from openspec change add-input-parameter-submission §6,
 // scenario "Live paused build populates pendingInput from wfapi":
 // when core /api/json reports building==true with an InputAction
@@ -1458,4 +1493,111 @@ func stringPtr(s string) *string { return &s }
 // place.
 func writeFile(path, contents string) error {
 	return os.WriteFile(path, []byte(contents), 0o600)
+}
+
+// ---------------------------------------------------------------------------
+// extend-build-addressing §10: `jk build params <url>`
+// ---------------------------------------------------------------------------
+
+// Happy path: a build triggered with two parameters renders both as
+// {name,value} entries plus the resolved buildNumber/buildUrl.
+func Test_BuildParams_Numeric(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/42/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":42,"url":"http://example/job/svc/42/",
+				"actions":[
+					{"_class":"hudson.model.CauseAction"},
+					{"_class":"hudson.model.ParametersAction","parameters":[
+						{"name":"ENV","value":"prod"},
+						{"name":"DRY_RUN","value":false}
+					]}
+				]
+			}`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "params", srv.URL + "/job/svc/42/"})
+	if err != nil {
+		t.Fatalf("build params: %v", err)
+	}
+	for _, want := range []string{
+		`schemaVersion: "1"`,
+		"buildNumber: 42",
+		"name: ENV",
+		"value: prod",
+		"name: DRY_RUN",
+		"value: false",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// Unparameterized build: parameters MUST render as empty array, never
+// null, never an error.
+func Test_BuildParams_EmptyArray(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/hello/3/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":3,"url":"http://example/job/hello/3/",
+				"actions":[{"_class":"hudson.model.CauseAction"}]
+			}`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "params", srv.URL + "/job/hello/3/", "-o", "json"})
+	if err != nil {
+		t.Fatalf("build params: %v", err)
+	}
+	if !strings.Contains(stdout, `"parameters":[]`) {
+		t.Errorf("expected parameters:[] in json output:\n%s", stdout)
+	}
+}
+
+// Permalink synergy: `jk build params <url>/lastSuccessfulBuild/`
+// MUST succeed and report the resolved numeric build number.
+func Test_BuildParams_Permalink(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/lastSuccessfulBuild/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":17,"url":"http://example/job/svc/17/",
+				"actions":[
+					{"_class":"hudson.model.ParametersAction","parameters":[
+						{"name":"ENV","value":"staging"}
+					]}
+				]
+			}`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "params", srv.URL + "/job/svc/lastSuccessfulBuild/"})
+	if err != nil {
+		t.Fatalf("build params (permalink): %v", err)
+	}
+	for _, want := range []string{
+		"buildNumber: 17",
+		"name: ENV",
+		"value: staging",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// Missing build address must be rejected by the resolveBuildRef gate
+// with a friendly suggestion (same gating story as `build status`).
+func Test_BuildParams_MissingBuildNumber(t *testing.T) {
+	_, _, err := runJK(t, []string{"build", "params", "https://jenkins.example/job/svc/"})
+	if err == nil {
+		t.Fatal("expected missing-build-number error")
+	}
+	if !strings.Contains(err.Error(), "build number") {
+		t.Errorf("error must mention build number: %v", err)
+	}
 }
