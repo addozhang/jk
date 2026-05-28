@@ -27,6 +27,7 @@
 package jenkins
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -298,12 +299,21 @@ const redactedPlaceholder = "REDACTED"
 
 func (d *debugLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone the request for dumping so we can scrub Authorization without
-	// mutating what the next RoundTripper sees.
+	// mutating what the next RoundTripper sees. NOTE: Request.Clone is a
+	// SHALLOW clone — the Body field (an io.ReadCloser) is shared with the
+	// original request. Reading from dumpReq.Body would drain req.Body and
+	// leave downstream RoundTrippers (and ultimately Go's transport) with
+	// a zero-byte body, which some HTTP intermediaries
+	// reject with 400. To dump the body safely we must obtain an
+	// INDEPENDENT reader, either from req.GetBody (preferred; callers
+	// such as TriggerBuild set it) or by buffering + restoring the body.
 	dumpReq := req.Clone(req.Context())
 	if dumpReq.Header.Get("Authorization") != "" {
 		dumpReq.Header.Set("Authorization", redactedPlaceholder)
 	}
-	if dump, err := httputil.DumpRequest(dumpReq, true); err == nil {
+	if err := snapshotBodyForDump(req, dumpReq); err != nil {
+		d.logf("--- jk request (body snapshot failed: %v) ---\n", err)
+	} else if dump, err := httputil.DumpRequest(dumpReq, true); err == nil {
 		d.logf("--- jk request ---\n%s\n", dump)
 	} else {
 		d.logf("--- jk request (dump failed: %v) ---\n", err)
@@ -320,6 +330,44 @@ func (d *debugLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 		d.logf("--- jk response (dump failed: %v) ---\n", derr)
 	}
 	return resp, nil
+}
+
+// snapshotBodyForDump gives dumpReq its own independent Body so that
+// httputil.DumpRequest can render the payload without consuming the
+// body that the real outbound request needs.
+//
+// Three cases:
+//
+//  1. Body is nil or http.NoBody — nothing to do.
+//  2. orig.GetBody is set — call it for a fresh reader. This is the
+//     happy path; callers performing state-changing requests (e.g.
+//     TriggerBuild) already set GetBody so the crumb RoundTripper can
+//     replay the body on a CSRF retry. The same hook serves us here.
+//  3. GetBody is nil — buffer orig.Body into memory, then restore both
+//     orig.Body and dumpReq.Body as independent readers backed by the
+//     same byte slice. This costs one full body read; acceptable for
+//     debug mode (off by default) and unavoidable when the caller did
+//     not provide a replay hook.
+func snapshotBodyForDump(orig, dumpReq *http.Request) error {
+	if orig.Body == nil || orig.Body == http.NoBody {
+		return nil
+	}
+	if orig.GetBody != nil {
+		fresh, err := orig.GetBody()
+		if err != nil {
+			return err
+		}
+		dumpReq.Body = fresh
+		return nil
+	}
+	buf, err := io.ReadAll(orig.Body)
+	if err != nil {
+		return err
+	}
+	_ = orig.Body.Close() //nolint:errcheck // body already drained; close is best-effort
+	orig.Body = io.NopCloser(bytes.NewReader(buf))
+	dumpReq.Body = io.NopCloser(bytes.NewReader(buf))
+	return nil
 }
 
 // logf writes a debug line to the configured sink. Errors are

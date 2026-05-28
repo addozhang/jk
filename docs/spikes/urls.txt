@@ -52,3 +52,35 @@ https://Jenkins.FOO.com/job/svc/
 
 # Local e2e harness build URL (deploy-input pipeline)
 http://localhost:18080/job/deploy-input/21/
+
+# --- Jenkins permalink trailing segments (extend-build-addressing) ---
+# Closed allowlist of 7 names served by Jenkins core's PermalinkProjectAction.
+# Matched case-sensitively; non-matching trailing non-numeric segments must
+# still surface the "not a Jenkins job URL" error.
+
+# Permalink: lastBuild on a top-level pipeline
+http://jenkins.foo.com/job/svc/lastBuild/
+
+# Permalink: lastSuccessfulBuild on a folder-nested path
+http://jenkins.foo.com/job/team/job/svc/lastSuccessfulBuild
+
+# Permalink: lastFailedBuild
+http://jenkins.foo.com/job/svc/lastFailedBuild/
+
+# Permalink: lastStableBuild
+http://jenkins.foo.com/job/svc/lastStableBuild/
+
+# Permalink: lastUnstableBuild
+http://jenkins.foo.com/job/svc/lastUnstableBuild/
+
+# Permalink: lastUnsuccessfulBuild
+http://jenkins.foo.com/job/svc/lastUnsuccessfulBuild/
+
+# Permalink: lastCompletedBuild
+http://jenkins.foo.com/job/svc/lastCompletedBuild/
+
+# REJECTED: typo — Jenkins has no `latestBuild` permalink
+# http://jenkins.foo.com/job/svc/latestBuild/
+
+# REJECTED: case mismatch — Jenkins serves permalinks case-sensitively
+# http://jenkins.foo.com/job/svc/LASTBUILD/

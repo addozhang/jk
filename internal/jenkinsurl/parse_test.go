@@ -282,6 +282,8 @@ func Test_Parse_RoundTripsThroughAPIPath(t *testing.T) {
 		"https://jenkins.foo.com/job/team/job/svc",
 		"https://jenkins.foo.com/job/team/job/svc/job/main/42",
 		"http://jenkins.local:8080/job/svc",
+		"http://jenkins.local:8080/job/svc/lastBuild",
+		"http://jenkins.local:8080/job/svc/lastSuccessfulBuild",
 	}
 
 	for _, raw := range cases {
@@ -293,6 +295,153 @@ func Test_Parse_RoundTripsThroughAPIPath(t *testing.T) {
 			got := ref.APIPath("")
 			if got != raw {
 				t.Errorf("round-trip mismatch:\n  in:  %q\n  out: %q", raw, got)
+			}
+		})
+	}
+}
+
+// Test_Parse_Permalinks covers the seven Jenkins permalink names as trailing
+// build references. See openspec/changes/extend-build-addressing/specs/
+// url-resolution/spec.md.
+func Test_Parse_Permalinks(t *testing.T) {
+	tests := []struct {
+		name   string
+		rawURL string
+		want   Ref
+	}{
+		{
+			name:   "lastBuild on top-level pipeline",
+			rawURL: "http://jenkins.foo.com/job/svc/lastBuild/",
+			want: Ref{
+				Host:           "http://jenkins.foo.com",
+				JobSegments:    []string{"svc"},
+				BuildPermalink: "lastBuild",
+			},
+		},
+		{
+			name:   "lastSuccessfulBuild on folder-nested path",
+			rawURL: "http://jenkins.foo.com/job/team/job/svc/lastSuccessfulBuild",
+			want: Ref{
+				Host:           "http://jenkins.foo.com",
+				JobSegments:    []string{"team", "svc"},
+				BuildPermalink: "lastSuccessfulBuild",
+			},
+		},
+		{
+			name:   "lastFailedBuild",
+			rawURL: "http://jenkins.foo.com/job/svc/lastFailedBuild/",
+			want: Ref{
+				Host:           "http://jenkins.foo.com",
+				JobSegments:    []string{"svc"},
+				BuildPermalink: "lastFailedBuild",
+			},
+		},
+		{
+			name:   "lastStableBuild",
+			rawURL: "http://jenkins.foo.com/job/svc/lastStableBuild/",
+			want: Ref{
+				Host:           "http://jenkins.foo.com",
+				JobSegments:    []string{"svc"},
+				BuildPermalink: "lastStableBuild",
+			},
+		},
+		{
+			name:   "lastUnstableBuild",
+			rawURL: "http://jenkins.foo.com/job/svc/lastUnstableBuild/",
+			want: Ref{
+				Host:           "http://jenkins.foo.com",
+				JobSegments:    []string{"svc"},
+				BuildPermalink: "lastUnstableBuild",
+			},
+		},
+		{
+			name:   "lastUnsuccessfulBuild",
+			rawURL: "http://jenkins.foo.com/job/svc/lastUnsuccessfulBuild/",
+			want: Ref{
+				Host:           "http://jenkins.foo.com",
+				JobSegments:    []string{"svc"},
+				BuildPermalink: "lastUnsuccessfulBuild",
+			},
+		},
+		{
+			name:   "lastCompletedBuild",
+			rawURL: "http://jenkins.foo.com/job/svc/lastCompletedBuild/",
+			want: Ref{
+				Host:           "http://jenkins.foo.com",
+				JobSegments:    []string{"svc"},
+				BuildPermalink: "lastCompletedBuild",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Parse(tt.rawURL)
+			if err != nil {
+				t.Fatalf("Parse(%q) returned unexpected error: %v", tt.rawURL, err)
+			}
+			if !reflect.DeepEqual(*got, tt.want) {
+				t.Fatalf("Parse(%q):\n  got  %+v\n  want %+v", tt.rawURL, *got, tt.want)
+			}
+			if got.BuildNumber != 0 {
+				t.Errorf("expected BuildNumber == 0 when BuildPermalink set, got %d", got.BuildNumber)
+			}
+		})
+	}
+}
+
+// Test_Parse_PermalinkRejections asserts that case-mismatched or unknown
+// trailing non-numeric segments still surface the existing "not a Jenkins
+// job URL" error rather than being silently accepted.
+func Test_Parse_PermalinkRejections(t *testing.T) {
+	tests := []struct {
+		name   string
+		rawURL string
+	}{
+		{name: "typo latestBuild", rawURL: "http://jenkins.foo.com/job/svc/latestBuild/"},
+		{name: "uppercase LASTBUILD", rawURL: "http://jenkins.foo.com/job/svc/LASTBUILD/"},
+		{name: "lowercase lastbuild", rawURL: "http://jenkins.foo.com/job/svc/lastbuild/"},
+		{name: "config.xml sub-resource", rawURL: "http://jenkins.foo.com/job/svc/config.xml"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse(tt.rawURL)
+			if err == nil {
+				t.Fatalf("Parse(%q) expected error, got nil", tt.rawURL)
+			}
+			if !strings.Contains(err.Error(), "not a Jenkins job") {
+				t.Errorf("Parse(%q) error = %q; want substring %q", tt.rawURL, err.Error(), "not a Jenkins job")
+			}
+		})
+	}
+}
+
+// Test_Ref_APIPath_Permalink verifies the URL builder emits BuildPermalink
+// in the build-position slot, mirroring the numeric build-number branch.
+func Test_Ref_APIPath_Permalink(t *testing.T) {
+	tests := []struct {
+		name   string
+		ref    Ref
+		suffix string
+		want   string
+	}{
+		{
+			name:   "permalink with api/json suffix",
+			ref:    Ref{Host: "https://jenkins.foo.com", JobSegments: []string{"svc"}, BuildPermalink: "lastSuccessfulBuild"},
+			suffix: "api/json",
+			want:   "https://jenkins.foo.com/job/svc/lastSuccessfulBuild/api/json",
+		},
+		{
+			name:   "permalink on nested path, no suffix",
+			ref:    Ref{Host: "https://jenkins.foo.com", JobSegments: []string{"team", "svc"}, BuildPermalink: "lastBuild"},
+			suffix: "",
+			want:   "https://jenkins.foo.com/job/team/job/svc/lastBuild",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ref.APIPath(tt.suffix); got != tt.want {
+				t.Errorf("APIPath(%q) = %q; want %q", tt.suffix, got, tt.want)
 			}
 		})
 	}

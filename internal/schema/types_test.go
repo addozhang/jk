@@ -329,3 +329,57 @@ func Test_BuildTrigger_NullableBuildIdentifiers(t *testing.T) {
 		}
 	}
 }
+
+// extend-build-addressing §8.1: BuildParams MUST marshal with
+// camelCase fields, MUST emit `parameters:[]` (not null) when empty,
+// and MUST preserve a parameter value of null faithfully (Jenkins
+// returns null for redacted/credentials params and we MUST NOT
+// silently drop or coerce).
+func Test_BuildParams_EmptyParametersIsArray(t *testing.T) {
+	bp := schema.BuildParams{
+		BuildURL:    "https://jenkins.example.com/job/svc/42/",
+		BuildNumber: 42,
+		Parameters:  []schema.BuildParameter{},
+	}
+	b, err := json.Marshal(bp)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	s := string(b)
+	for _, want := range []string{
+		`"buildUrl":"https://jenkins.example.com/job/svc/42/"`,
+		`"buildNumber":42`,
+		`"parameters":[]`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in %s", want, s)
+		}
+	}
+}
+
+func Test_BuildParams_NullValuePreserved(t *testing.T) {
+	// Jenkins returns `null` for password/credentials parameter values.
+	// The marshaler MUST emit explicit `null`, not omit the field, not
+	// coerce to "".
+	bp := schema.BuildParams{
+		BuildURL:    "https://jenkins.example.com/job/svc/42/",
+		BuildNumber: 42,
+		Parameters: []schema.BuildParameter{
+			{Name: "API_TOKEN", Value: nil},
+			{Name: "ENV", Value: "prod"},
+		},
+	}
+	b, err := json.Marshal(bp)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	s := string(b)
+	for _, want := range []string{
+		`{"name":"API_TOKEN","value":null}`,
+		`{"name":"ENV","value":"prod"}`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in %s", want, s)
+		}
+	}
+}
