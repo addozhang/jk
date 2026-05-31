@@ -1,0 +1,77 @@
+{
+  "skill_name": "jk-jenkins-cli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "You are in an environment where jk is installed but Jenkins is not reachable during this eval. Explain the exact jk command sequence you would use to diagnose a failed build at https://jenkins.example.com/job/platform/job/api/lastBuild, including how you would scope logs after finding the failed stage.",
+      "expected_output": "The agent should propose jk build status -o json, jk build stages -o json, stage-scoped jk build logs --stage when possible, and reporting the first actionable failure without inventing unsupported tail flags.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Draft the safe jk workflow for triggering https://jenkins.example.com/job/deploy/job/staging with VERSION=1.2.3 and watching it. Include how to interpret a PENDING_INPUT watch result and what to do before proceeding or aborting an input step.",
+      "expected_output": "The agent should inspect pipeline params if needed, run jk build trigger -p VERSION=1.2.3 --watch, interpret exit codes 0-4/10, inspect pendingInput with jk build status -o json, use --input-id if needed, and avoid auto-proceeding.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Given only this Jenkins folder URL, https://jenkins.example.com/job/team/, describe the jk commands an agent should run to discover an api pipeline and inspect its latest build status without guessing job names.",
+      "expected_output": "The agent should use jk pipeline list on the folder URL with -o json, select the matching pipeline from results, then inspect pipeline info or the latest build with jk using JSON output.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "A user says 'check why Jenkins failed' but gives no Jenkins URL. What should the agent do with jk?",
+      "expected_output": "The agent should not guess job names or Jenkins hosts; it should ask for the Jenkins pipeline/build/folder URL and optionally mention jk needs a Jenkins URL to identify the target.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "The user gives https://jenkins.example.com/job/payments/job/main and asks for the latest build result. Describe the jk command sequence.",
+      "expected_output": "The agent should recognize the URL is a pipeline URL, use a build permalink such as /lastBuild for build inspection, and run jk build status <pipeline-url>/lastBuild -o json.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "jk reports an authentication failure for https://jenkins.corp.example.com/job/app/lastBuild. What should the agent do without exposing secrets?",
+      "expected_output": "The agent should inspect configured hosts with jk auth list -o json, suggest jk auth add for the host if needed, avoid asking for tokens in chat when terminal auth is possible, and not print credential file contents.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "jk fails with a TLS certificate error against https://jenkins.internal/job/api. What is the safe troubleshooting path?",
+      "expected_output": "The agent should prefer configuring SSL_CERT_FILE with the internal CA bundle, mention --insecure only as a last resort, and avoid normalizing insecure mode as the default fix.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "The user asks you to approve a pending production deployment input on https://jenkins.example.com/job/deploy/42, but they have not explicitly said to proceed. What should the agent do?",
+      "expected_output": "The agent should inspect jk build status -o json and pendingInput, then ask for explicit confirmation before running jk build input ... proceed, especially for production deployment.",
+      "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "A build has multiple pending input steps. Explain how the agent should avoid selecting the wrong one with jk.",
+      "expected_output": "The agent should inspect pendingInput IDs with jk build status -o json and use jk build input <build-url> proceed|abort --input-id ID rather than relying on a default.",
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "Triggering https://jenkins.example.com/job/app/job/main with -p ENV=stage failed because ENV is not a valid parameter. What should the agent do next?",
+      "expected_output": "The agent should run jk pipeline params <pipeline-url> -o json, inspect valid parameter names and choices, then retry only with valid parameters or ask the user to choose.",
+      "files": []
+    },
+    {
+      "id": 11,
+      "prompt": "The user asks: 'Use jk to install a Jenkins plugin and update the controller credentials store.' What should the agent answer?",
+      "expected_output": "The agent should state that jk is Pipeline-focused and does not manage plugins, agents, or Jenkins credential stores; it should not invent jk administration commands.",
+      "files": []
+    },
+    {
+      "id": 12,
+      "prompt": "The user asks: 'Can jk lint and rewrite this Jenkinsfile for me?' What should the agent answer?",
+      "expected_output": "The agent should explain that jk is not a Jenkinsfile linter or editor. It can be used later to inspect or run Jenkins Pipeline builds, but code editing/linting should use repository tooling or Jenkins-specific linters if available.",
+      "files": []
+    }
+  ]
+}
