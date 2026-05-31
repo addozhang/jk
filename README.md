@@ -9,6 +9,7 @@ A Pipeline-native CLI for Jenkins.
 - Stable, self-owned schema: `yaml` (default), `json`, or `raw`. Output begins with `schemaVersion: "1"`; breaking changes bump the version.
 - Pipeline-aware: understands wfapi (stage tree, parallel branches, pending input).
 - Scripting-friendly: `--watch` returns the build result via exit code; `-o json` pipes cleanly into `jq`.
+- Agent-ready: ships an optional skill that teaches AI coding agents how to use `jk` safely from the terminal.
 
 **What jk is not**
 - Not a general Jenkins administration tool — no plugin/agent/credentials-store management.
@@ -60,6 +61,19 @@ jk build input https://jenkins.example.com/job/deploy/42 proceed \
 # 6. Inspect the parameter values a build was triggered with
 jk build params https://jenkins.example.com/job/my-pipeline/lastSuccessfulBuild
 ```
+
+## AI agent skill
+
+`jk` includes a companion skill for AI coding agents at [`skills/jk-jenkins-cli/`](./skills/jk-jenkins-cli/). The skill is a concise operating guide for agents that need to inspect Jenkins failures, trigger and watch builds, read stage-scoped logs, or handle pending Pipeline `input` steps with the right safety checks.
+
+Use it when an agent has terminal access and needs to work with Jenkins through `jk`. The skill emphasizes:
+
+- using Jenkins URLs as the unit of identity;
+- preferring `-o json` for machine-readable inspection;
+- inspecting status and stages before reading logs;
+- using `--stage` for focused log reads;
+- checking `pendingInput` and `--input-id` before acting on input steps;
+- avoiding unsupported Jenkins administration tasks.
 
 ## First-time setup
 
