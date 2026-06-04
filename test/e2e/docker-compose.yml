@@ -12,10 +12,13 @@
 # with whatever else the developer is already running. The JNLP agent
 # port is not exposed; we run agentless.
 #
-# An nginx TLS proxy is included to support the SSL_CERT_FILE e2e test
-# (task 15.3). It listens on host port 18443 and forwards to Jenkins on
-# the internal Docker network. The self-signed cert lives at
-# test/e2e/nginx/server.crt; SSL_CERT_FILE must point at it.
+# An nginx proxy is included for two e2e scenarios:
+#   * a TLS endpoint on host port 18443 (forwards to Jenkins on the
+#     internal Docker network) for the SSL_CERT_FILE test; the
+#     self-signed cert lives at test/e2e/nginx/server.crt.
+#   * a context-path mount on host port 18081 that exposes the same
+#     Jenkins under a /jenkins/ prefix, so the e2e suite can drive `jk`
+#     against an instance served beneath a context path.
 #
 # Volumes:
 #   jenkins_home  - persists across `docker compose up` cycles so plugin
@@ -55,6 +58,7 @@ services:
     container_name: jk-e2e-nginx
     ports:
       - "18443:8443"
+      - "18081:8081"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./nginx/server.crt:/etc/nginx/certs/server.crt:ro

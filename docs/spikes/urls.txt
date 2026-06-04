@@ -16,6 +16,7 @@
 #   - mixed case hostname (must lowercase)
 #   - trailing query + fragment (must be stripped from JobSegments)
 #   - localhost harness URLs
+#   - context-path-mounted instances (prefix before the first /job/)
 
 # Top-level pipeline, trailing slash
 https://jenkins.foo.com/job/svc/
@@ -84,3 +85,25 @@ http://jenkins.foo.com/job/svc/lastCompletedBuild/
 
 # REJECTED: case mismatch — Jenkins serves permalinks case-sensitively
 # http://jenkins.foo.com/job/svc/LASTBUILD/
+
+# --- Context-path-mounted instances (parse-context-path-prefix) ---
+# Jenkins behind a reverse proxy or multi-tenant mount lives under a context
+# path that precedes the first /job/ segment. The prefix is captured on
+# Ref.BasePath (verbatim, leading slash, no trailing slash) and emitted by
+# APIPath before /job/. It does NOT affect the host credential key. A path
+# with no /job/ token anywhere is still rejected.
+
+# Single-segment context path with build number (BasePath "/domain")
+https://example.com/domain/job/abc/job/svc/2/
+
+# Common reverse-proxy /jenkins mount on a bare job (BasePath "/jenkins")
+https://ci.example.com/jenkins/job/svc/
+
+# Multi-segment context path (BasePath "/team/ci")
+https://example.com/team/ci/job/svc/job/main/42/
+
+# Context path with a permalink trailing segment
+https://example.com/jenkins/job/svc/lastSuccessfulBuild/
+
+# REJECTED: context path but no /job/ token at all
+# https://example.com/jenkins/view/All/

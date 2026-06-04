@@ -419,6 +419,12 @@ func (c *Client) postEmptyInput(ctx context.Context, ref *jenkinsurl.Ref, inputI
 // (e.g. `/job/svc/42/wfapi/inputSubmit?inputId=Deploy`) and joined
 // with ref.Host. Otherwise the legacy `/input/<id>/submit` path is
 // used.
+//
+// Note: proceedURL is joined with ref.Host (scheme+host only), NOT
+// ref.APIPath, on purpose. Jenkins emits proceedURL already including
+// its own context path (e.g. `/jenkins/job/...` on a context-path
+// instance), so prepending the bare host is correct; using APIPath
+// here would double the BasePath prefix.
 func (c *Client) postSubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID, proceedText, proceedURL string, parameters []InputParameterValue) error {
 	type kv struct {
 		Name  string `json:"name"`
