@@ -110,13 +110,16 @@ Pass `--insecure` only as a last resort; it disables all certificate verificatio
 | `https://host/job/pipeline/42` | specific build #42 |
 | `https://host/job/pipeline/lastBuild` | symbolic last build |
 | `https://host/job/folder/` | folder (for `pipeline list`) |
+| `https://host/jenkins/job/pipeline` | instance mounted under a context path (`/jenkins`, `/domain`, …) |
 
 Any of the seven Jenkins build permalinks may appear in the build-position slot in place of a numeric build number: `lastBuild`, `lastCompletedBuild`, `lastSuccessfulBuild`, `lastUnsuccessfulBuild`, `lastFailedBuild`, `lastStableBuild`, `lastUnstableBuild`. Jenkins resolves them server-side; `jk` output always records the resolved numeric `buildNumber`.
+
+Jenkins instances deployed under a URL **context path** (a reverse-proxy mount such as `/jenkins`, or a multi-tenant prefix like `/domain`) are supported: any path segments before the first `/job/` are preserved and replayed against the server. The context path does **not** change the credential lookup key — credentials are still keyed per host (see below).
 
 Normalisation rules:
 - Trailing slashes are stripped.
 - Default ports (`:80` for `http`, `:443` for `https`) are dropped when looking up credentials, so `https://jenkins.example.com` and `https://jenkins.example.com:443` resolve to the same credential entry.
-- The hostname (scheme + host + non-default port) is the credential lookup key — one entry per Jenkins instance.
+- The hostname (scheme + host + non-default port) is the credential lookup key — one entry per Jenkins instance. A context path (e.g. `/jenkins`) is not part of this key.
 
 ## Scripting with jk
 

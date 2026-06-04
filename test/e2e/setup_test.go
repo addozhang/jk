@@ -67,6 +67,13 @@ const (
 	defaultURL    = "http://localhost:18080"
 	defaultUser   = "admin"
 	defaultSecret = "admin-password"
+	// contextPathHost / contextPathBaseURL address the same Jenkins
+	// through the nginx /jenkins mount (see test/e2e/nginx/nginx.conf).
+	// contextPathHost is the host-only credential key; contextPathBaseURL
+	// carries the context path that contextpath_e2e_test.go drives jk
+	// against.
+	contextPathHost    = "http://localhost:18081"
+	contextPathBaseURL = contextPathHost + "/jenkins"
 )
 
 // envOr returns the named env var or fallback when unset/empty.
@@ -131,6 +138,15 @@ func setupHarness(ctx context.Context) (*harness, error) {
 	}
 	if err := store.Add(url, auth.Credential{Username: user, Token: secret}); err != nil {
 		return nil, fmt.Errorf("seed credentials: %w", err)
+	}
+
+	// Seed a credential for the nginx /jenkins context-path mount too.
+	// The key is host-only (scheme://host) — exactly what hostKeyFromURL
+	// derives for a /jenkins/... request — so contextpath_e2e_test.go
+	// proves a context-path URL resolves a host-keyed credential without
+	// the context path leaking into the lookup.
+	if err := store.Add(contextPathHost, auth.Credential{Username: user, Token: secret}); err != nil {
+		return nil, fmt.Errorf("seed context-path credentials: %w", err)
 	}
 
 	if err := waitForJenkins(ctx, url, user, secret); err != nil {

@@ -165,6 +165,8 @@ Returns the current state of a build.
 
 The `<url>` may address the build by numeric build number (`/job/svc/42/`) or by any of the seven Jenkins permalinks (`lastBuild`, `lastCompletedBuild`, `lastSuccessfulBuild`, `lastUnsuccessfulBuild`, `lastFailedBuild`, `lastStableBuild`, `lastUnstableBuild`). Permalinks are resolved server-side by Jenkins; the `buildNumber` field in the output always reflects the resolved numeric build.
 
+All `<url>` arguments (here and across every command) accept Jenkins instances mounted under a URL context path — any segments before the first `/job/` (e.g. `https://host/jenkins/job/svc/42/`) are preserved and replayed against the server. The context path is not part of the credential lookup key, which remains `scheme://host[:port]`.
+
 | Field | Type | Tier | Description |
 |---|---|---|---|
 | `buildUrl` | `string` | `stable` | Canonical Jenkins URL of the build. |

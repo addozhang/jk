@@ -10,6 +10,7 @@
 //
 //	type Ref struct {
 //	    Host        string   // "https://jenkins.foo.com" (scheme + host, default ports stripped)
+//	    BasePath    string   // "/jenkins" context-path prefix, "" when root-mounted
 //	    JobSegments []string // every /job/<name> segment in order, URL-decoded
 //	    BuildNumber int      // 0 means "unspecified" — commands default to lastBuild
 //	}
@@ -39,6 +40,14 @@ type Ref struct {
 	// Host is the credential-lookup key: scheme + lowercase hostname + port,
 	// with default ports (`:80` for http, `:443` for https) stripped.
 	Host string
+	// BasePath is the Jenkins context-path prefix that precedes the first
+	// `/job/` segment, captured verbatim (NOT URL-decoded) and normalized to
+	// a leading `/` with no trailing `/`. It is empty for instances mounted
+	// at the host root. Examples: `/jenkins`, `/domain`, `/team/ci`. BasePath
+	// is deliberately excluded from Host/HostKey: credentials are keyed per
+	// host, matching how the auth injector resolves them, so a context path
+	// never forces a separate credential entry.
+	BasePath string
 	// JobSegments holds each `/job/<name>` segment in URL order, decoded.
 	// Always non-empty for a successfully parsed Ref.
 	JobSegments []string
@@ -78,9 +87,9 @@ var buildPermalinks = map[string]struct{}{
 }
 
 // APIPath returns a fully-qualified Jenkins URL formed from the Ref's host,
-// every JobSegment joined by `/job/`, the optional BuildNumber or
-// BuildPermalink, and an optional suffix (e.g. "api/json" or
-// "wfapi/describe").
+// the optional context-path prefix (BasePath), every JobSegment joined by
+// `/job/`, the optional BuildNumber or BuildPermalink, and an optional suffix
+// (e.g. "api/json" or "wfapi/describe").
 //
 // Segments are re-encoded with url.PathEscape so spaces or other special
 // characters survive the round trip. BuildPermalink is emitted as a literal
@@ -89,6 +98,10 @@ var buildPermalinks = map[string]struct{}{
 func (r *Ref) APIPath(suffix string) string {
 	var b strings.Builder
 	b.WriteString(r.Host)
+	// Emit the Jenkins context path (if any) between the host and the first
+	// /job/ segment so requests address the instance at its real mount point.
+	// BasePath is already normalized to a leading slash with no trailing slash.
+	b.WriteString(r.BasePath)
 	for _, seg := range r.JobSegments {
 		b.WriteString("/job/")
 		b.WriteString(url.PathEscape(seg))
@@ -134,7 +147,7 @@ func Parse(raw string) (*Ref, error) {
 		return nil, fmt.Errorf("jenkinsurl: %q is missing a host", raw)
 	}
 
-	segments, buildNumber, permalink, err := extractJobSegments(u.Path)
+	basePath, segments, buildNumber, permalink, err := extractJobSegments(u.Path)
 	if err != nil {
 		return nil, fmt.Errorf("jenkinsurl: %q: %w", raw, err)
 	}
@@ -144,31 +157,36 @@ func Parse(raw string) (*Ref, error) {
 
 	return &Ref{
 		Host:           normalizeHost(u.Scheme, u.Host),
+		BasePath:       basePath,
 		JobSegments:    segments,
 		BuildNumber:    buildNumber,
 		BuildPermalink: permalink,
 	}, nil
 }
 
-// extractJobSegments walks the path, asserts the alternating `job/<name>`
-// pattern, decodes each name, and recognizes an optional trailing segment
-// as either a numeric build number or a known Jenkins permalink.
+// extractJobSegments walks the path, captures any leading context-path
+// prefix that precedes the first `job` token, asserts the alternating
+// `job/<name>` pattern from there, decodes each name, and recognizes an
+// optional trailing segment as either a numeric build number or a known
+// Jenkins permalink.
 //
 // It distinguishes three failure modes:
-//   - returns (nil, 0, "", nil) when the path is simply not a job URL (no
-//     /job/ keyword, or a non-job path like /view/All/); the caller turns
-//     this into the "not a Jenkins job URL" error;
+//   - returns ("", nil, 0, "", nil) when the path is simply not a job URL (no
+//     /job/ keyword anywhere, or a non-job path like /view/All/); the caller
+//     turns this into the "not a Jenkins job URL" error;
 //   - returns a descriptive error for malformed-but-job-shaped paths (empty
 //     segments, decode failure);
-//   - returns (segments, buildNumber, permalink, nil) on success — exactly
-//     one of buildNumber>0 or permalink!="" is populated, or neither.
-func extractJobSegments(path string) (segments []string, buildNumber int, permalink string, err error) {
+//   - returns (basePath, segments, buildNumber, permalink, nil) on success.
+//     basePath is the verbatim prefix before the first `job` token (leading
+//     slash, no trailing slash, "" when root-mounted); exactly one of
+//     buildNumber>0 or permalink!="" is populated, or neither.
+func extractJobSegments(path string) (basePath string, segments []string, buildNumber int, permalink string, err error) {
 	// Trim surrounding slashes so "/job/svc/" and "job/svc" produce the same
 	// raw parts. We keep internal empties so "/job//job/svc/" still surfaces
 	// the empty job segment.
 	trimmed := strings.Trim(path, "/")
 	if trimmed == "" {
-		return nil, 0, "", nil
+		return "", nil, 0, "", nil
 	}
 	parts := strings.Split(trimmed, "/")
 
@@ -176,6 +194,7 @@ func extractJobSegments(path string) (segments []string, buildNumber int, permal
 	// a `job/<name>` pair (i.e. the preceding token is not "job"). Probe
 	// numeric first, then the permalink allowlist. Anything else falls
 	// through so the alternation walker below rejects it as a non-job URL.
+	// This operates on the tail and is independent of any leading prefix.
 	if n := len(parts); n >= 2 && parts[n-2] != "job" {
 		if bn, perr := strconv.Atoi(parts[n-1]); perr == nil && bn > 0 {
 			buildNumber = bn
@@ -186,9 +205,23 @@ func extractJobSegments(path string) (segments []string, buildNumber int, permal
 		}
 	}
 
-	// A non-job URL: first token must be "job" for this to be a job URL at all.
-	if parts[0] != "job" {
-		return nil, 0, "", nil
+	// Locate the first `job` token. Everything before it is the Jenkins
+	// context-path prefix (a reverse-proxy mount such as /jenkins, or a
+	// multi-tenant /domain). A path with no `job` token anywhere is not a
+	// job URL at all.
+	jobIdx := -1
+	for i, p := range parts {
+		if p == "job" {
+			jobIdx = i
+			break
+		}
+	}
+	if jobIdx == -1 {
+		return "", nil, 0, "", nil
+	}
+	if jobIdx > 0 {
+		basePath = "/" + strings.Join(parts[:jobIdx], "/")
+		parts = parts[jobIdx:]
 	}
 
 	// Walk pairs. We expect "job" / "<name>" alternation; any deviation in
@@ -196,26 +229,26 @@ func extractJobSegments(path string) (segments []string, buildNumber int, permal
 	// name slot is a malformed job URL we should report explicitly.
 	for i := 0; i < len(parts); i += 2 {
 		if parts[i] != "job" {
-			return nil, 0, "", nil
+			return "", nil, 0, "", nil
 		}
 		if i+1 >= len(parts) {
 			// Trailing "/job/" with no name.
-			return nil, 0, "", errors.New("empty job segment in URL path")
+			return "", nil, 0, "", errors.New("empty job segment in URL path")
 		}
 		nameRaw := parts[i+1]
 		if nameRaw == "" {
-			return nil, 0, "", errors.New("empty job segment in URL path")
+			return "", nil, 0, "", errors.New("empty job segment in URL path")
 		}
 		name, derr := url.PathUnescape(nameRaw)
 		if derr != nil {
-			return nil, 0, "", fmt.Errorf("decoding segment %q: %w", nameRaw, derr)
+			return "", nil, 0, "", fmt.Errorf("decoding segment %q: %w", nameRaw, derr)
 		}
 		if name == "" {
-			return nil, 0, "", errors.New("empty job segment in URL path")
+			return "", nil, 0, "", errors.New("empty job segment in URL path")
 		}
 		segments = append(segments, name)
 	}
-	return segments, buildNumber, permalink, nil
+	return basePath, segments, buildNumber, permalink, nil
 }
 
 // normalizeHost lowercases the hostname and strips the port when it matches

@@ -146,6 +146,124 @@ func Test_Parse_ValidURLs(t *testing.T) {
 	}
 }
 
+// Test_Parse_ContextPath covers Jenkins instances deployed under a URL
+// context path (reverse-proxy /jenkins, multi-tenant /domain, etc.). The
+// prefix preceding the first /job/ segment is captured verbatim on
+// Ref.BasePath and must not leak into the credential lookup key (HostKey).
+// See openspec/changes/parse-context-path-prefix/specs/url-resolution/spec.md.
+func Test_Parse_ContextPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		want    Ref
+		hostKey string
+	}{
+		{
+			name:   "single-segment context path with build number",
+			rawURL: "https://example.com/domain/job/abc/job/svc/2/",
+			want: Ref{
+				Host:        "https://example.com",
+				BasePath:    "/domain",
+				JobSegments: []string{"abc", "svc"},
+				BuildNumber: 2,
+			},
+			hostKey: "https://example.com",
+		},
+		{
+			name:   "common /jenkins context path on a bare job",
+			rawURL: "https://ci.example.com/jenkins/job/svc/",
+			want: Ref{
+				Host:        "https://ci.example.com",
+				BasePath:    "/jenkins",
+				JobSegments: []string{"svc"},
+				BuildNumber: 0,
+			},
+			hostKey: "https://ci.example.com",
+		},
+		{
+			name:   "multi-segment context path with explicit build number",
+			rawURL: "https://example.com/team/ci/job/svc/job/main/42/",
+			want: Ref{
+				Host:        "https://example.com",
+				BasePath:    "/team/ci",
+				JobSegments: []string{"svc", "main"},
+				BuildNumber: 42,
+			},
+			hostKey: "https://example.com",
+		},
+		{
+			name:   "context path with permalink trailing segment",
+			rawURL: "https://example.com/jenkins/job/svc/lastSuccessfulBuild/",
+			want: Ref{
+				Host:           "https://example.com",
+				BasePath:       "/jenkins",
+				JobSegments:    []string{"svc"},
+				BuildPermalink: "lastSuccessfulBuild",
+			},
+			hostKey: "https://example.com",
+		},
+		{
+			name:   "root-mounted URL yields empty BasePath",
+			rawURL: "https://jenkins.foo.com/job/svc/42/",
+			want: Ref{
+				Host:        "https://jenkins.foo.com",
+				BasePath:    "",
+				JobSegments: []string{"svc"},
+				BuildNumber: 42,
+			},
+			hostKey: "https://jenkins.foo.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Parse(tt.rawURL)
+			if err != nil {
+				t.Fatalf("Parse(%q) returned unexpected error: %v", tt.rawURL, err)
+			}
+			if !reflect.DeepEqual(*got, tt.want) {
+				t.Fatalf("Parse(%q):\n  got  %+v\n  want %+v", tt.rawURL, *got, tt.want)
+			}
+			if k := got.HostKey(); k != tt.hostKey {
+				t.Errorf("HostKey() = %q; want %q (context path must not affect credential key)", k, tt.hostKey)
+			}
+		})
+	}
+}
+
+// Test_Parse_ContextPath_Rejections asserts that adding a context-path prefix
+// does not loosen the two core rejections: a path with no /job/ token at all,
+// and an empty job segment after the prefix.
+func Test_Parse_ContextPath_Rejections(t *testing.T) {
+	tests := []struct {
+		name        string
+		rawURL      string
+		wantErrFrag string
+	}{
+		{
+			name:        "context path but no /job/ token",
+			rawURL:      "https://example.com/jenkins/view/All/",
+			wantErrFrag: "not a Jenkins job",
+		},
+		{
+			name:        "empty job segment after context path",
+			rawURL:      "https://example.com/jenkins/job//job/svc/",
+			wantErrFrag: "empty job segment",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse(tt.rawURL)
+			if err == nil {
+				t.Fatalf("Parse(%q) expected error, got nil", tt.rawURL)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrFrag) {
+				t.Errorf("Parse(%q) error = %q; want substring %q", tt.rawURL, err.Error(), tt.wantErrFrag)
+			}
+		})
+	}
+}
+
 // Test_Parse_InvalidURLs covers the "Invalid URL rejected" scenarios.
 // We assert on a substring of the error message so the message text can evolve
 // without churning the test, but the key vocabulary is verified.
@@ -262,6 +380,24 @@ func Test_Ref_APIPath(t *testing.T) {
 			suffix: "",
 			want:   "https://jenkins.foo.com/job/svc/7",
 		},
+		{
+			name:   "context path emitted before first /job/",
+			ref:    Ref{Host: "https://example.com", BasePath: "/domain", JobSegments: []string{"abc", "svc"}, BuildNumber: 2},
+			suffix: "api/json",
+			want:   "https://example.com/domain/job/abc/job/svc/2/api/json",
+		},
+		{
+			name:   "multi-segment context path with suffix",
+			ref:    Ref{Host: "https://example.com", BasePath: "/team/ci", JobSegments: []string{"svc"}},
+			suffix: "wfapi/describe",
+			want:   "https://example.com/team/ci/job/svc/wfapi/describe",
+		},
+		{
+			name:   "empty context path renders identically to root-mounted",
+			ref:    Ref{Host: "https://jenkins.foo.com", BasePath: "", JobSegments: []string{"svc"}},
+			suffix: "api/json",
+			want:   "https://jenkins.foo.com/job/svc/api/json",
+		},
 	}
 
 	for _, tt := range tests {
@@ -284,6 +420,9 @@ func Test_Parse_RoundTripsThroughAPIPath(t *testing.T) {
 		"http://jenkins.local:8080/job/svc",
 		"http://jenkins.local:8080/job/svc/lastBuild",
 		"http://jenkins.local:8080/job/svc/lastSuccessfulBuild",
+		"https://example.com/jenkins/job/svc",
+		"https://example.com/jenkins/job/svc/job/main/42",
+		"https://example.com/team/ci/job/svc/lastSuccessfulBuild",
 	}
 
 	for _, raw := range cases {
@@ -436,6 +575,12 @@ func Test_Ref_APIPath_Permalink(t *testing.T) {
 			ref:    Ref{Host: "https://jenkins.foo.com", JobSegments: []string{"team", "svc"}, BuildPermalink: "lastBuild"},
 			suffix: "",
 			want:   "https://jenkins.foo.com/job/team/job/svc/lastBuild",
+		},
+		{
+			name:   "permalink under a context path",
+			ref:    Ref{Host: "https://example.com", BasePath: "/jenkins", JobSegments: []string{"svc"}, BuildPermalink: "lastSuccessfulBuild"},
+			suffix: "api/json",
+			want:   "https://example.com/jenkins/job/svc/lastSuccessfulBuild/api/json",
 		},
 	}
 	for _, tt := range tests {
