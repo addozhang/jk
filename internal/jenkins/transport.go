@@ -166,7 +166,7 @@ func New(opts Options) (*http.Client, error) {
 			Jar:       jar,
 		}
 		mgr := newCrumbManager(crumbClient)
-		rt = &crumbRoundTripper{next: rt, mgr: mgr}
+		rt = &crumbRoundTripper{next: rt, mgr: mgr, creds: opts.Credentials}
 	}
 	if opts.Debug {
 		rt = &debugLogger{next: rt, w: opts.Stderr}
@@ -236,9 +236,12 @@ func loadCertPool(path string) (*x509.CertPool, error) {
 // ---------------------------------------------------------------------------
 
 // authInjector is a RoundTripper that adds an HTTP Basic Authorization
-// header derived from the credentials store. The lookup key is the
-// request's scheme + host (with default ports stripped) — matching the
-// normalization done by [jenkinsurl.Ref.HostKey].
+// header derived from the credentials store. The credential is selected by
+// [auth.Store.Resolve], which performs a segment-boundary longest-prefix
+// match over the stored keys: a request to a context-path URL
+// (e.g. https://ci/team-a/job/svc) prefers a credential keyed to
+// https://ci/team-a over a host-only https://ci entry, while requests that
+// match no context entry fall back to the host-only credential.
 //
 // If the request already has an Authorization header, it is preserved
 // untouched: callers (the crumb fetcher, tests, future SSO bridges) own
@@ -250,8 +253,7 @@ type authInjector struct {
 
 func (a *authInjector) RoundTrip(req *http.Request) (*http.Response, error) {
 	if a.creds != nil && req.Header.Get("Authorization") == "" {
-		key := hostKeyFromURL(req.URL)
-		if c, ok, err := a.creds.Get(key); err == nil && ok {
+		if _, c, ok, err := a.creds.Resolve(req.URL); err == nil && ok {
 			// Clone the request to avoid mutating the caller's value;
 			// RoundTrip contract requires the request to be unchanged
 			// after return.

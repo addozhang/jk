@@ -13,10 +13,12 @@ package cli
 //     | jk auth add ...`) still works in CI.
 //
 //   - Host normalization: we accept any URL the user might paste —
-//     including ones with a path like `/job/foo/` — and store only the
-//     scheme + host + optional non-default port. This matches the
-//     specs/auth normalization scenario and the credential-lookup key
-//     used by the transport.
+//     including ones with a path like `/job/foo/` — and store the
+//     scheme + host + optional non-default port, plus an optional
+//     context-path prefix (the path before the first `/job/`, or the
+//     whole path when there is no `/job/`). This matches the
+//     specs/auth normalization scenarios and the credential-lookup key
+//     used by the transport (auth.Store.Resolve).
 //
 //   - Overwrite protection: a second `add` for an existing host is
 //     refused unless `--force` is set. We do NOT prompt for y/n
@@ -108,9 +110,12 @@ func newAuthAddCommand(flags *GlobalFlags) *cobra.Command {
 		Short: "Store API token for a Jenkins host",
 		Long: `Prompts for a username and API token, then writes them to
 ~/.config/jk/credentials (mode 0600). The <host> argument is normalized
-to scheme://host[:port]; any path is discarded.
+to scheme://host[:port] plus an optional context-path prefix (the part of
+the path before the first /job/ segment, or the whole path when there is
+no /job/). Job hierarchy and trailing slashes are discarded. The
+confirmation message names the exact key that was stored.
 
-If an entry already exists for the host, the command refuses to
+If an entry already exists for the key, the command refuses to
 overwrite without --force.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -265,9 +270,18 @@ func openCredentialStore() (auth.Store, error) {
 }
 
 // normalizeAuthHost reduces a user-supplied URL to its scheme + host
-// + optional non-default port. Trailing slash, path, query, and
-// fragment are discarded. Returns a JKError on parse failure so the
-// user sees a friendly message instead of url.Parse's terse output.
+// + optional non-default port, plus an optional context-path prefix.
+// The prefix is the portion of the path preceding the first `/job/`
+// segment, or the entire path when the URL contains no `/job/` segment
+// (see extractBasePath); it is normalized to a leading `/` with no
+// trailing slash, and an empty result yields a host-only key identical
+// to prior behavior. Query and fragment are discarded. Returns a JKError
+// on parse failure so the user sees a friendly message instead of
+// url.Parse's terse output.
+//
+// Anchoring the stored key on the same base-path rule that request
+// resolution uses (auth.Store.Resolve) guarantees a context-path entry
+// lands on the segment boundary the resolver later computes.
 func normalizeAuthHost(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -297,7 +311,39 @@ func normalizeAuthHost(raw string) (string, error) {
 			Message: fmt.Sprintf("Unsupported scheme %q (expected http or https).", u.Scheme),
 		}
 	}
-	return u.Scheme + "://" + u.Host, nil
+	return u.Scheme + "://" + u.Host + extractBasePath(u.Path), nil
+}
+
+// extractBasePath reduces a URL path to the Jenkins context-path prefix that
+// becomes part of the credential key. The prefix is the portion preceding the
+// first `/job/` segment; when the path contains no `/job/` segment the entire
+// path is treated as the prefix (so `auth add https://h/team-a` keys on
+// `/team-a`). The result is normalized to a leading `/` with no trailing
+// slash; an empty or pure-job path yields "" (a host-only key). The `/job/`
+// boundary handling mirrors jenkinsurl's base-path extraction so a stored key
+// lands on the same segment boundary that request resolution computes.
+func extractBasePath(rawPath string) string {
+	trimmed := strings.Trim(rawPath, "/")
+	if trimmed == "" {
+		return ""
+	}
+	parts := strings.Split(trimmed, "/")
+	jobIdx := -1
+	for i, p := range parts {
+		if p == "job" {
+			jobIdx = i
+			break
+		}
+	}
+	switch {
+	case jobIdx == 0:
+		// Path is job hierarchy from the start: no context path.
+		return ""
+	case jobIdx > 0:
+		parts = parts[:jobIdx]
+	}
+	// jobIdx == -1: no `job` token anywhere; keep the whole path as prefix.
+	return "/" + strings.Join(parts, "/")
 }
 
 // promptLine writes prompt to out and reads a single newline-delimited

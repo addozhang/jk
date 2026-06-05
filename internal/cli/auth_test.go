@@ -103,7 +103,10 @@ func Test_AuthAdd_FirstTimeWritesCredential(t *testing.T) {
 	}
 }
 
-// Spec: "Host normalization". Trailing slash and any path are stripped.
+// Spec: "Host-only normalization (no context path)". Trailing slash and
+// any /job/ hierarchy collapse to the bare host; a non-default port is
+// preserved. Context-path retention is covered by Test_normalizeAuthHost
+// and Test_AuthAdd_ContextPath_RetainsKeyAndEchoes.
 func Test_AuthAdd_HostNormalization(t *testing.T) {
 	for _, tc := range []struct {
 		input string
@@ -111,7 +114,7 @@ func Test_AuthAdd_HostNormalization(t *testing.T) {
 	}{
 		{"https://jenkins.example.com/", "https://jenkins.example.com"},
 		{"https://jenkins.example.com/job/foo/", "https://jenkins.example.com"},
-		{"https://jenkins.example.com:8443/anything", "https://jenkins.example.com:8443"},
+		{"https://jenkins.example.com:8443/job/x", "https://jenkins.example.com:8443"},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
 			_, _, err := runJKWithStdin(t, []string{"auth", "add", tc.input}, "u\nt\n")
@@ -124,6 +127,99 @@ func Test_AuthAdd_HostNormalization(t *testing.T) {
 				t.Errorf("expected host %q in store, got %v", tc.want, hosts)
 			}
 		})
+	}
+}
+
+// Test_normalizeAuthHost exercises the base-path capture rule directly
+// (design.md D3, auth/spec.md "Add credentials for a Jenkins host"): the
+// stored key is scheme + host + optional non-default port, plus the path
+// prefix before the first `/job/` segment (or the whole path when there is
+// no `/job/`), normalized to a leading `/` with no trailing slash.
+func Test_normalizeAuthHost(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare host", "https://jenkins.example.com", "https://jenkins.example.com"},
+		{"trailing slash stays host-only", "https://jenkins.example.com/", "https://jenkins.example.com"},
+		{"job hierarchy stays host-only", "https://jenkins.example.com/job/foo/", "https://jenkins.example.com"},
+		{"non-default port preserved", "https://jenkins.example.com:8443/job/x", "https://jenkins.example.com:8443"},
+		{"single context segment retained", "https://ci.example.com/team-a", "https://ci.example.com/team-a"},
+		{"context segment trailing slash normalized", "https://ci.example.com/team-a/", "https://ci.example.com/team-a"},
+		{"context path before job hierarchy retained", "https://ci.example.com/team-a/job/svc/", "https://ci.example.com/team-a"},
+		{"multi-segment context path retained", "https://ci.example.com/team/ci", "https://ci.example.com/team/ci"},
+		{"non-job path retained verbatim", "https://jenkins.example.com:8443/anything", "https://jenkins.example.com:8443/anything"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := normalizeAuthHost(tc.in)
+			if err != nil {
+				t.Fatalf("normalizeAuthHost(%q): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("normalizeAuthHost(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// Spec: "Context-path instance credential addition". The stored key retains
+// the context path, the confirmation names that full key, and a sibling
+// instance on the same host is left untouched.
+func Test_AuthAdd_ContextPath_RetainsKeyAndEchoes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	withStubReadSecret(t)
+
+	path := credentialsPathForTest(t)
+	store, err := auth.NewFileStore(path)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	// Pre-seed a sibling instance on the same host; it must survive.
+	if err := store.Add("https://ci.example.com/team-b", auth.Credential{Username: "bob", Token: "tok-b"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	root := NewRootCommand()
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	root.SetIn(strings.NewReader("alice\ntok-a\n"))
+	// Job hierarchy after the context path must be stripped, leaving /team-a.
+	root.SetArgs([]string{"auth", "add", "https://ci.example.com/team-a/job/svc/"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("auth add: %v\nstderr: %s", err, errBuf.String())
+	}
+
+	if !strings.Contains(errBuf.String(), "https://ci.example.com/team-a") {
+		t.Errorf("confirmation does not name the context-path key: %q", errBuf.String())
+	}
+	if c, ok, _ := store.Get("https://ci.example.com/team-a"); !ok || c.Token != "tok-a" {
+		t.Errorf("team-a not stored under context-path key: ok=%v c=%+v", ok, c)
+	}
+	if c, ok, _ := store.Get("https://ci.example.com/team-b"); !ok || c.Token != "tok-b" {
+		t.Errorf("sibling team-b entry was disturbed: ok=%v c=%+v", ok, c)
+	}
+}
+
+// `auth remove` must normalize its argument the same way `auth add` does, so
+// removing via a job URL still targets the stored context-path key.
+func Test_AuthRemove_ContextPathKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, _ := auth.NewFileStore(credentialsPathForTest(t))
+	if err := store.Add("https://ci.example.com/team-a", auth.Credential{Username: "u", Token: "t"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	root := NewRootCommand()
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	root.SetArgs([]string{"auth", "remove", "https://ci.example.com/team-a/job/svc/"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("auth remove: %v\nstderr: %s", err, errBuf.String())
+	}
+	if _, ok, _ := store.Get("https://ci.example.com/team-a"); ok {
+		t.Errorf("context-path entry still present after remove")
 	}
 }
 

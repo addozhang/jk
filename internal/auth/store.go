@@ -37,8 +37,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -65,6 +67,20 @@ type Store interface {
 	// entry exists for host; in that case the returned Credential is
 	// zero-valued and the error is nil.
 	Get(host string) (Credential, bool, error)
+
+	// Resolve selects the most specific stored credential for a request
+	// URL using segment-boundary longest-prefix matching: a stored key
+	// matches when its scheme and host equal the request's and the
+	// request path equals the key's path or continues past it at a `/`
+	// boundary; among all matches the one with the longest path wins. A
+	// host-only key (no path) is the shortest valid prefix and therefore
+	// matches any same-host request, preserving single-instance behavior.
+	// ok is false when no key matches. The returned key is the exact
+	// stored key, suitable as a crumb cache key and for deriving the
+	// instance's context path. Unlike Get, Resolve is the lookup used by
+	// the transport layer, where the request URL carries an arbitrary API
+	// sub-path rather than a bare host.
+	Resolve(reqURL *url.URL) (key string, c Credential, ok bool, err error)
 
 	// List returns the configured hosts in insertion order. The result
 	// is always a non-nil slice (possibly empty) so callers can pass it
@@ -251,6 +267,92 @@ func (s *fileStore) Get(host string) (Credential, bool, error) {
 	}
 	c, ok := shape.Hosts[host]
 	return c, ok, nil
+}
+
+// Resolve implements [Store.Resolve]. It performs a single linear scan of
+// the stored keys, tracking the longest key path that is a segment-boundary
+// prefix of the request URL. Credential stores hold a handful of hosts, so a
+// linear scan is negligible and avoids any secondary index. Both the request
+// host and each stored key's host are normalized identically (lowercased,
+// default port stripped) so a request carrying an explicit `:443`/`:80`
+// still matches a key stored without it, matching the transport's host
+// normalization.
+func (s *fileStore) Resolve(reqURL *url.URL) (string, Credential, bool, error) {
+	if reqURL == nil {
+		return "", Credential{}, false, nil
+	}
+	shape, err := s.load()
+	if err != nil {
+		return "", Credential{}, false, err
+	}
+
+	reqScheme := strings.ToLower(reqURL.Scheme)
+	reqOrigin := reqScheme + "://" + normalizeHostPort(reqScheme, reqURL.Host)
+	reqPath := reqURL.Path
+
+	bestKey := ""
+	bestPath := ""
+	found := false
+	for key := range shape.Hosts {
+		origin, keyPath, ok := splitOriginPath(key)
+		if !ok || origin != reqOrigin {
+			continue
+		}
+		if !pathMatches(reqPath, keyPath) {
+			continue
+		}
+		// Longest key path wins. Ties are impossible: two equal paths on
+		// the same origin would be the same key. The found flag handles
+		// the empty-path host-only key, whose length never beats a
+		// non-empty path but must still win when it is the only match.
+		if !found || len(keyPath) > len(bestPath) {
+			bestKey, bestPath, found = key, keyPath, true
+		}
+	}
+	if !found {
+		return "", Credential{}, false, nil
+	}
+	return bestKey, shape.Hosts[bestKey], true, nil
+}
+
+// splitOriginPath splits a stored credential key into its normalized origin
+// (`scheme://host`, default port stripped) and its context-path remainder.
+// A host-only key yields an empty path. Keys that do not parse as an
+// absolute http(s) URL are reported with ok=false so Resolve skips them.
+func splitOriginPath(key string) (origin, path string, ok bool) {
+	u, err := url.Parse(key)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	return scheme + "://" + normalizeHostPort(scheme, u.Host), u.Path, true
+}
+
+// pathMatches reports whether keyPath is a segment-boundary prefix of
+// reqPath. An empty keyPath (host-only key) matches any path as the shortest
+// valid prefix. A non-empty keyPath matches only when reqPath equals it or
+// continues past it at a `/` boundary, so `/team-a` matches `/team-a/job/x`
+// but never `/team-amber`.
+func pathMatches(reqPath, keyPath string) bool {
+	if keyPath == "" {
+		return true
+	}
+	return reqPath == keyPath || strings.HasPrefix(reqPath, keyPath+"/")
+}
+
+// normalizeHostPort lowercases host and strips the port when it is the
+// scheme's default (80 for http, 443 for https). It mirrors the
+// normalization in jenkinsurl.normalizeHost and transport.hostKeyFromURL so
+// credential keys resolve consistently across the write and request paths.
+func normalizeHostPort(scheme, host string) string {
+	host = strings.ToLower(host)
+	switch {
+	case scheme == "http" && strings.HasSuffix(host, ":80"):
+		host = strings.TrimSuffix(host, ":80")
+	case scheme == "https" && strings.HasSuffix(host, ":443"):
+		host = strings.TrimSuffix(host, ":443")
+	}
+	return host
 }
 
 // List implements [Store.List]. The returned slice is filtered against

@@ -39,6 +39,8 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+
+	"github.com/addozhang/jk/internal/auth"
 )
 
 // closeBody discards the error from Body.Close. Used in places where
@@ -70,7 +72,7 @@ type crumbManager struct {
 	fetcher *http.Client
 
 	mu    sync.Mutex
-	cache map[string]crumbCacheEntry // keyed by hostKeyFromURL
+	cache map[string]crumbCacheEntry // keyed by resolved credential key (or host root on no-match)
 }
 
 func newCrumbManager(fetcher *http.Client) *crumbManager {
@@ -115,17 +117,19 @@ func (m *crumbManager) invalidate(hostKey string) {
 	delete(m.cache, hostKey)
 }
 
-// fetch issues a GET to /crumbIssuer/api/json on the same host as
-// reqURL, using a request derived from src so we inherit context,
-// scheme, and (via the auth injector inside m.fetcher) credentials.
+// fetch issues a GET to <basePath>/crumbIssuer/api/json on the same host
+// as reqURL, using a request derived from src so we inherit context,
+// scheme, and (via the auth injector inside m.fetcher) credentials. The
+// basePath is the context path of the matched credential key (empty for a
+// host-root instance), so multi-instance hosts hit the correct endpoint.
 //
 // Returns:
 //   - entry with field+value populated on success;
 //   - entry with disabled=true if the endpoint returned 404 (CSRF off);
 //   - error if the network call failed or the response was unparseable.
-func (m *crumbManager) fetch(src *http.Request) (crumbCacheEntry, error) {
+func (m *crumbManager) fetch(src *http.Request, basePath string) (crumbCacheEntry, error) {
 	u := *src.URL
-	u.Path = "/crumbIssuer/api/json"
+	u.Path = basePath + "/crumbIssuer/api/json"
 	u.RawQuery = ""
 	u.Fragment = ""
 
@@ -177,9 +181,34 @@ func (m *crumbManager) fetch(src *http.Request) (crumbCacheEntry, error) {
 // injector so the crumb fetch itself is authenticated, and the manager
 // holds a separate reference to the auth-wrapped base so its fetches
 // bypass `crumbRoundTripper` (and the recursion that would imply).
+//
+// creds is the same credential store the auth injector uses. The crumb
+// layer consults it (via Resolve) to discover the context path of the
+// instance the request targets, so the crumb endpoint and per-instance
+// cache key follow the matched credential rather than the bare host.
 type crumbRoundTripper struct {
-	next http.RoundTripper
-	mgr  *crumbManager
+	next  http.RoundTripper
+	mgr   *crumbManager
+	creds auth.Store
+}
+
+// resolveCrumbScope determines the cache key and context base path for a
+// request's CSRF crumb. When a credential matches (via Resolve), the crumb
+// is scoped to that credential's key: the cache is keyed on the full key and
+// the crumb endpoint is built under the key's base path, so two Jenkins
+// instances sharing a host but differing in context path keep independent
+// crumbs. When no credential matches (or no store is configured), it falls
+// back to the host root — scheme://host with an empty base path — preserving
+// the original host-only behavior.
+func (c *crumbRoundTripper) resolveCrumbScope(u *url.URL) (cacheKey, basePath string) {
+	if c.creds != nil {
+		if key, _, ok, err := c.creds.Resolve(u); err == nil && ok {
+			if ku, perr := url.Parse(key); perr == nil {
+				return key, strings.TrimRight(ku.Path, "/")
+			}
+		}
+	}
+	return hostKeyFromURL(u), ""
 }
 
 // isStateChanging reports whether method requires CSRF protection per
@@ -207,12 +236,12 @@ func (c *crumbRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		return c.next.RoundTrip(req)
 	}
 
-	hostKey := hostKeyFromURL(req.URL)
+	cacheKey, basePath := c.resolveCrumbScope(req.URL)
 
 	// Attempt 1: use cached entry if any, otherwise fetch.
-	entry, ok := c.mgr.get(hostKey)
+	entry, ok := c.mgr.get(cacheKey)
 	if !ok {
-		fetched, err := c.mgr.fetch(req)
+		fetched, err := c.mgr.fetch(req, basePath)
 		if err != nil {
 			// Surface fetch errors directly; the API client (group 11)
 			// will translate them into crumb_failed if/when the user
@@ -220,7 +249,7 @@ func (c *crumbRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			return nil, err
 		}
 		entry = fetched
-		c.mgr.set(hostKey, entry)
+		c.mgr.set(cacheKey, entry)
 	}
 
 	first, err := c.attempt(req, entry)
@@ -255,8 +284,8 @@ func (c *crumbRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	// CSRF retry path: invalidate, refetch, replay body, attempt again.
-	c.mgr.invalidate(hostKey)
-	refreshed, err := c.mgr.fetch(req)
+	c.mgr.invalidate(cacheKey)
+	refreshed, err := c.mgr.fetch(req, basePath)
 	if err != nil {
 		// Could not refresh; return a synthetic 403 with the original body
 		// so the caller still sees the server's message. Callers in
@@ -275,7 +304,7 @@ func (c *crumbRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			Request:    first.Request,
 		}, nil
 	}
-	c.mgr.set(hostKey, refreshed)
+	c.mgr.set(cacheKey, refreshed)
 
 	retryReq, err := cloneWithFreshBody(req)
 	if err != nil {

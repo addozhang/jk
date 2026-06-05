@@ -21,9 +21,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/addozhang/jk/internal/auth"
 	"github.com/addozhang/jk/internal/jenkins"
 )
 
@@ -98,6 +100,80 @@ func postJSON(t *testing.T, client *http.Client, url, body string) (*http.Respon
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return client.Do(req)
+}
+
+// ---------------------------------------------------------------------------
+// context-path crumb fixtures (D5)
+// ---------------------------------------------------------------------------
+
+// contextCrumbState records, per request path, what a multi-instance fake
+// Jenkins observed: how many times each crumb endpoint was fetched and the
+// Jenkins-Crumb header presented on each state-changing POST. It lets the
+// context-path tests prove the crumb endpoint and cache key follow the
+// resolved credential's base path rather than the host root.
+type contextCrumbState struct {
+	mu           sync.Mutex
+	crumbFetches map[string]int    // crumb endpoint path -> fetch count
+	postCrumb    map[string]string // POST path -> Jenkins-Crumb header seen
+}
+
+func (s *contextCrumbState) fetches(path string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.crumbFetches[path]
+}
+
+func (s *contextCrumbState) crumbFor(path string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.postCrumb[path]
+}
+
+// newContextCrumbServer returns a fake Jenkins hosting multiple instances on
+// a single origin, each under its own context path. It serves a crumb at
+// "<ctx>/crumbIssuer/api/json" whose value encodes the context (e.g.
+// "crumb/team-a") so tests can confirm the right crumb is bound to the right
+// instance, and accepts state-changing POSTs under any other path.
+func newContextCrumbServer() (*httptest.Server, *contextCrumbState) {
+	st := &contextCrumbState{
+		crumbFetches: map[string]int{},
+		postCrumb:    map[string]string{},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/crumbIssuer/api/json") {
+			ctx := strings.TrimSuffix(r.URL.Path, "/crumbIssuer/api/json") // "" or "/team-a"
+			st.mu.Lock()
+			st.crumbFetches[r.URL.Path]++
+			st.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"crumb":"crumb` + ctx + `","crumbRequestField":"Jenkins-Crumb"}`))
+			return
+		}
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		st.mu.Lock()
+		st.postCrumb[r.URL.Path] = r.Header.Get("Jenkins-Crumb")
+		st.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	return srv, st
+}
+
+// newCrumbClientWithCreds builds a CSRF-enabled client backed by the given
+// credential store, so the crumb layer can resolve a request's context path.
+func newCrumbClientWithCreds(t *testing.T, store auth.Store) *http.Client {
+	t.Helper()
+	client, err := jenkins.New(jenkins.Options{
+		Stderr:      io.Discard,
+		EnableCSRF:  true,
+		Credentials: store,
+	})
+	if err != nil {
+		t.Fatalf("jenkins.New: %v", err)
+	}
+	return client
 }
 
 // ---------------------------------------------------------------------------
@@ -291,5 +367,106 @@ func Test_Crumb_RetryRequiresGetBody(t *testing.T) {
 	}
 	if got := state.stateChanges.Load(); got != 1 {
 		t.Errorf("POST attempts=%d, want 1 (no retry without GetBody)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// context-path crumb resolution (D5)
+// ---------------------------------------------------------------------------
+
+// Test_Crumb_FetchedFromContextPathEndpoint covers D5: when a credential is
+// keyed to a context path, the crumb must be fetched from that instance's
+// endpoint ("<ctx>/crumbIssuer/api/json"), not the host root.
+func Test_Crumb_FetchedFromContextPathEndpoint(t *testing.T) {
+	srv, st := newContextCrumbServer()
+	t.Cleanup(srv.Close)
+
+	store := newMemStore()
+	_ = store.Add(srv.URL+"/team-a", auth.Credential{Username: "alice", Token: "tok"})
+
+	client := newCrumbClientWithCreds(t, store)
+	resp, err := postJSON(t, client, srv.URL+"/team-a/job/x/build", `{}`)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status=%d, want 200", resp.StatusCode)
+	}
+	if got := st.fetches("/team-a/crumbIssuer/api/json"); got != 1 {
+		t.Errorf("context crumb fetches=%d, want 1", got)
+	}
+	if got := st.fetches("/crumbIssuer/api/json"); got != 0 {
+		t.Errorf("root crumb fetched %d times, want 0 (must use context path)", got)
+	}
+	if got := st.crumbFor("/team-a/job/x/build"); got != "crumb/team-a" {
+		t.Errorf("POST crumb header=%q, want %q", got, "crumb/team-a")
+	}
+}
+
+// Test_Crumb_IndependentCachePerContextPath covers D5: two instances sharing
+// a single host but differing in context path must keep independent cached
+// crumbs, each fetched from its own endpoint and bound to its own POSTs.
+func Test_Crumb_IndependentCachePerContextPath(t *testing.T) {
+	srv, st := newContextCrumbServer()
+	t.Cleanup(srv.Close)
+
+	store := newMemStore()
+	_ = store.Add(srv.URL+"/team-a", auth.Credential{Username: "a", Token: "ta"})
+	_ = store.Add(srv.URL+"/team-b", auth.Credential{Username: "b", Token: "tb"})
+
+	client := newCrumbClientWithCreds(t, store)
+
+	for i := 0; i < 2; i++ {
+		resp, err := postJSON(t, client, srv.URL+"/team-a/job/x/build", `{}`)
+		if err != nil {
+			t.Fatalf("POST team-a #%d: %v", i, err)
+		}
+		_ = resp.Body.Close()
+	}
+	for i := 0; i < 2; i++ {
+		resp, err := postJSON(t, client, srv.URL+"/team-b/job/y/build", `{}`)
+		if err != nil {
+			t.Fatalf("POST team-b #%d: %v", i, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	if got := st.fetches("/team-a/crumbIssuer/api/json"); got != 1 {
+		t.Errorf("team-a crumb fetches=%d, want 1 (cached after first)", got)
+	}
+	if got := st.fetches("/team-b/crumbIssuer/api/json"); got != 1 {
+		t.Errorf("team-b crumb fetches=%d, want 1 (independent cache key)", got)
+	}
+	if got := st.crumbFor("/team-a/job/x/build"); got != "crumb/team-a" {
+		t.Errorf("team-a POST crumb=%q, want %q", got, "crumb/team-a")
+	}
+	if got := st.crumbFor("/team-b/job/y/build"); got != "crumb/team-b" {
+		t.Errorf("team-b POST crumb=%q, want %q", got, "crumb/team-b")
+	}
+}
+
+// Test_Crumb_NoMatchingCredential_FallsBackToHostRoot documents the D5
+// limitation: without a matching credential the crumb layer cannot know the
+// instance's context path, so it falls back to the host-root crumb endpoint.
+func Test_Crumb_NoMatchingCredential_FallsBackToHostRoot(t *testing.T) {
+	srv, st := newContextCrumbServer()
+	t.Cleanup(srv.Close)
+
+	// No credentials configured: fall back to the host root.
+	client := newCrumbClient(t, srv.URL)
+	resp, err := postJSON(t, client, srv.URL+"/team-a/job/x/build", `{}`)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status=%d, want 200", resp.StatusCode)
+	}
+	if got := st.fetches("/crumbIssuer/api/json"); got != 1 {
+		t.Errorf("root crumb fetches=%d, want 1 (no-credential fallback)", got)
+	}
+	if got := st.fetches("/team-a/crumbIssuer/api/json"); got != 0 {
+		t.Errorf("context crumb fetched %d times, want 0 (no credential to scope it)", got)
 	}
 }
