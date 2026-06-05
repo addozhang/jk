@@ -73,11 +73,13 @@ Returns the configured Jenkins hosts. Never includes API tokens.
 
 | Field | Type | Tier | Description |
 |---|---|---|---|
-| `hosts` | `string[]` | `stable` | Array of host URLs (`scheme://host[:port]`), in insertion order. Empty array when no credentials are configured. |
+| `hosts` | `string[]` | `stable` | Array of credential keys (`scheme://host[:port]` plus an optional context path, e.g. `https://ci.example.com/team-a`), in insertion order. Empty array when no credentials are configured. |
 
 ### 3.2 `jk auth add <host>` / `jk auth remove <host>`
 
 These commands print a human-readable confirmation to stderr and do not emit structured output. No schema.
+
+The credential key is `scheme://host[:non-default-port]` plus an optional **context path** — the URL segments before the first `/job/` (a bare host or a pure `/job/...` URL yields no path; default ports `:80`/`:443` are dropped). Commands resolve a request URL to the most specific stored key that is a segment-boundary path-prefix of the URL, falling back to a host-only key when no context path matches. This lets several Jenkins instances on one host each carry a distinct credential while a plain host key still covers every path beneath it.
 
 ### 3.3 `jk pipeline info <url>`
 
@@ -165,7 +167,7 @@ Returns the current state of a build.
 
 The `<url>` may address the build by numeric build number (`/job/svc/42/`) or by any of the seven Jenkins permalinks (`lastBuild`, `lastCompletedBuild`, `lastSuccessfulBuild`, `lastUnsuccessfulBuild`, `lastFailedBuild`, `lastStableBuild`, `lastUnstableBuild`). Permalinks are resolved server-side by Jenkins; the `buildNumber` field in the output always reflects the resolved numeric build.
 
-All `<url>` arguments (here and across every command) accept Jenkins instances mounted under a URL context path — any segments before the first `/job/` (e.g. `https://host/jenkins/job/svc/42/`) are preserved and replayed against the server. The context path is not part of the credential lookup key, which remains `scheme://host[:port]`.
+All `<url>` arguments (here and across every command) accept Jenkins instances mounted under a URL context path — any segments before the first `/job/` (e.g. `https://host/jenkins/job/svc/42/`) are preserved and replayed against the server. The context path may also form part of the credential key (`scheme://host[:port]` plus optional base path); see §3.2 for how a request resolves to the most specific matching credential.
 
 | Field | Type | Tier | Description |
 |---|---|---|---|

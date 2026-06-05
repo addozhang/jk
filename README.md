@@ -5,7 +5,7 @@ A Pipeline-native CLI for Jenkins.
 `jk` is for the day-to-day pipeline operator: inspect a job, trigger a build, watch it, tail its log, answer an `input` step — all from the terminal, all driven by the Jenkins URL you'd paste into a browser.
 
 **What jk is**
-- URL-as-identity: every command takes a Jenkins URL; the hostname picks the stored credentials.
+- URL-as-identity: every command takes a Jenkins URL; the host (and optional context path) picks the stored credentials.
 - Stable, self-owned schema: `yaml` (default), `json`, or `raw`. Output begins with `schemaVersion: "1"`; breaking changes bump the version.
 - Pipeline-aware: understands wfapi (stage tree, parallel branches, pending input).
 - Scripting-friendly: `--watch` returns the build result via exit code; `-o json` pipes cleanly into `jq`.
@@ -86,6 +86,18 @@ jk auth add https://jenkins.example.com
 
 Credentials are stored in `~/.config/jk/credentials` (mode `0600`, TOML format). Tokens are never printed by any `jk` command.
 
+#### Context-path-scoped credentials
+
+`jk auth add` accepts an optional **context path**, so several Jenkins instances reachable on the same host — distinguished only by a reverse-proxy prefix — can each hold their own credential:
+
+```sh
+jk auth add https://ci.example.com/team-a   # instance under /team-a
+jk auth add https://ci.example.com/team-b   # instance under /team-b
+jk auth add https://ci.example.com          # host-only fallback (optional)
+```
+
+The stored key is `scheme://host[:port]` plus the normalised context path — the segments before the first `/job/`; a bare host or a pure `/job/...` URL stores no path. When a command runs, `jk` selects the **most specific** entry whose key is a path-prefix of the request URL, falling back to the host-only entry when no context path matches. Matching honours segment boundaries, so a `/team-a` entry never captures a request to `/team-amber`.
+
 ### 2. Custom CA / self-signed certificates
 
 If your Jenkins is behind a TLS proxy with a self-signed certificate, point `SSL_CERT_FILE` at the PEM bundle:
@@ -114,12 +126,12 @@ Pass `--insecure` only as a last resort; it disables all certificate verificatio
 
 Any of the seven Jenkins build permalinks may appear in the build-position slot in place of a numeric build number: `lastBuild`, `lastCompletedBuild`, `lastSuccessfulBuild`, `lastUnsuccessfulBuild`, `lastFailedBuild`, `lastStableBuild`, `lastUnstableBuild`. Jenkins resolves them server-side; `jk` output always records the resolved numeric `buildNumber`.
 
-Jenkins instances deployed under a URL **context path** (a reverse-proxy mount such as `/jenkins`, or a multi-tenant prefix like `/domain`) are supported: any path segments before the first `/job/` are preserved and replayed against the server. The context path does **not** change the credential lookup key — credentials are still keyed per host (see below).
+Jenkins instances deployed under a URL **context path** (a reverse-proxy mount such as `/jenkins`, or a multi-tenant prefix like `/domain`) are supported: any path segments before the first `/job/` are preserved and replayed against the server. A context path can also scope stored credentials, so multiple instances on one host can each hold their own token — see *Context-path-scoped credentials* under First-time setup.
 
 Normalisation rules:
 - Trailing slashes are stripped.
 - Default ports (`:80` for `http`, `:443` for `https`) are dropped when looking up credentials, so `https://jenkins.example.com` and `https://jenkins.example.com:443` resolve to the same credential entry.
-- The hostname (scheme + host + non-default port) is the credential lookup key — one entry per Jenkins instance. A context path (e.g. `/jenkins`) is not part of this key.
+- The credential lookup key is `scheme://host[:non-default-port]` plus an optional context path. A request resolves to the most specific stored key that is a segment-boundary path-prefix of the URL, falling back to a host-only entry — so a single host can serve several credentialed instances while a plain host entry still covers every path beneath it.
 
 ## Scripting with jk
 

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,52 @@ func (m *memoryStore) Add(host string, c auth.Credential) error {
 func (m *memoryStore) Get(host string) (auth.Credential, bool, error) {
 	c, ok := m.creds[host]
 	return c, ok, nil
+}
+
+// Resolve mirrors fileStore.Resolve's segment-boundary longest-prefix match
+// so transport/crumb tests exercise realistic credential resolution without
+// touching disk. Both the request host and each stored key's host are
+// normalized (lowercase, default port stripped) before comparison.
+func (m *memoryStore) Resolve(reqURL *url.URL) (string, auth.Credential, bool, error) {
+	if reqURL == nil {
+		return "", auth.Credential{}, false, nil
+	}
+	reqScheme := strings.ToLower(reqURL.Scheme)
+	reqOrigin := reqScheme + "://" + stripDefaultPort(reqScheme, strings.ToLower(reqURL.Host))
+
+	bestKey, bestPath := "", ""
+	found := false
+	for key := range m.creds {
+		ku, err := url.Parse(key)
+		if err != nil || ku.Scheme == "" || ku.Host == "" {
+			continue
+		}
+		ks := strings.ToLower(ku.Scheme)
+		if ks+"://"+stripDefaultPort(ks, strings.ToLower(ku.Host)) != reqOrigin {
+			continue
+		}
+		kp := ku.Path
+		if kp != "" && reqURL.Path != kp && !strings.HasPrefix(reqURL.Path, kp+"/") {
+			continue
+		}
+		if !found || len(kp) > len(bestPath) {
+			bestKey, bestPath, found = key, kp, true
+		}
+	}
+	if !found {
+		return "", auth.Credential{}, false, nil
+	}
+	return bestKey, m.creds[bestKey], true, nil
+}
+
+func stripDefaultPort(scheme, host string) string {
+	switch {
+	case scheme == "http" && strings.HasSuffix(host, ":80"):
+		return strings.TrimSuffix(host, ":80")
+	case scheme == "https" && strings.HasSuffix(host, ":443"):
+		return strings.TrimSuffix(host, ":443")
+	}
+	return host
 }
 
 func (m *memoryStore) List() ([]string, error) {
@@ -149,10 +196,70 @@ func Test_Client_InjectsBasicAuth_FromStore(t *testing.T) {
 		t.Errorf("Authorization is not Basic auth: %q", seenAuth)
 	}
 	// Round-trip the basic auth and verify user/token.
-	req, _ := http.NewRequest(http.MethodGet, srv.URL, http.NoBody)
-	req.SetBasicAuth("alice", "tok-xyz")
-	if want := req.Header.Get("Authorization"); seenAuth != want {
+	if want := basicAuthHeader("alice", "tok-xyz"); seenAuth != want {
 		t.Errorf("Authorization = %q, want %q", seenAuth, want)
+	}
+}
+
+// Two Jenkins instances share one host, distinguished only by context
+// path. The injector must pick the MOST SPECIFIC credential whose key is a
+// segment-boundary prefix of the request URL — not the host-only entry.
+// With the legacy Get(hostKeyFromURL(...)) lookup this fails because the
+// host-only key always wins; only Resolve() honors the context path.
+func Test_Client_InjectsBasicAuth_MostSpecificContextPath(t *testing.T) {
+	var seenAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	store := newMemStore()
+	_ = store.Add(srv.URL, auth.Credential{Username: "root", Token: "root-tok"})
+	_ = store.Add(srv.URL+"/team-a", auth.Credential{Username: "alice", Token: "alice-tok"})
+
+	client, err := jenkins.New(jenkins.Options{Credentials: store, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Get(srv.URL + "/team-a/job/svc/api/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if want := basicAuthHeader("alice", "alice-tok"); seenAuth != want {
+		t.Errorf("Authorization = %q, want most-specific %q", seenAuth, want)
+	}
+}
+
+// When no context-path entry matches the request, resolution must fall
+// back to the host-only credential. A sibling context entry (/team-a)
+// must NOT leak onto a /team-b request (segment-boundary safety).
+func Test_Client_InjectsBasicAuth_FallsBackToHostOnly(t *testing.T) {
+	var seenAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	store := newMemStore()
+	_ = store.Add(srv.URL, auth.Credential{Username: "root", Token: "root-tok"})
+	_ = store.Add(srv.URL+"/team-a", auth.Credential{Username: "alice", Token: "alice-tok"})
+
+	client, err := jenkins.New(jenkins.Options{Credentials: store, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Get(srv.URL + "/team-b/job/x/api/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if want := basicAuthHeader("root", "root-tok"); seenAuth != want {
+		t.Errorf("Authorization = %q, want host-only fallback %q", seenAuth, want)
 	}
 }
 
@@ -573,6 +680,15 @@ func certToPEM(t *testing.T, cert *x509.Certificate) []byte {
 		t.Fatal("nil cert")
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+}
+
+// basicAuthHeader returns the exact Authorization header value that
+// net/http produces for the given Basic credentials, so assertions can
+// compare against the same base64 encoding the transport emits.
+func basicAuthHeader(user, token string) string {
+	req, _ := http.NewRequest(http.MethodGet, "http://example.invalid", http.NoBody)
+	req.SetBasicAuth(user, token)
+	return req.Header.Get("Authorization")
 }
 
 // Assert that the package builds at all by referencing tls.VersionTLS12,

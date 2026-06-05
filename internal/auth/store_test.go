@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -282,6 +283,165 @@ func Test_NewFileStore_AcceptsExistingMalformedFile_WithClearError(t *testing.T)
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		t.Errorf("error should be a parse error, not NotExist: %v", err)
+	}
+}
+
+// mustParseURL parses raw or fails the test; Resolve takes a *url.URL.
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", raw, err)
+	}
+	return u
+}
+
+// Test_Store_Resolve exercises the segment-boundary longest-prefix match
+// that backs credential resolution (design.md D2/D6, auth/spec.md "Look up
+// credentials by hostname"). A host-only key (empty path) is the shortest
+// valid prefix of any same-host URL, so legacy single-instance files keep
+// resolving exactly as before.
+func Test_Store_Resolve(t *testing.T) {
+	credRoot := auth.Credential{Username: "root", Token: "tok-root"}
+	credA := auth.Credential{Username: "alice", Token: "tok-a"}
+	credB := auth.Credential{Username: "bob", Token: "tok-b"}
+	credSeg := auth.Credential{Username: "carol", Token: "tok-seg"}
+
+	seeds := []struct {
+		key  string
+		cred auth.Credential
+	}{
+		{"https://ci.example.com", credRoot},
+		{"https://ci.example.com/team-a", credA},
+		{"https://ci.example.com/team-b", credB},
+		// seg.example.com deliberately has NO host-only entry so the
+		// segment-boundary cases can assert a clean no-match.
+		{"https://seg.example.com/team-a", credSeg},
+	}
+
+	cases := []struct {
+		name    string
+		reqURL  string
+		wantKey string
+		wantTok string
+		wantOK  bool
+	}{
+		{
+			name:    "host-only match when no context entry applies",
+			reqURL:  "https://ci.example.com/job/x/api/json",
+			wantKey: "https://ci.example.com",
+			wantTok: "tok-root",
+			wantOK:  true,
+		},
+		{
+			name:    "most-specific context-path entry wins over host-only",
+			reqURL:  "https://ci.example.com/team-a/job/svc/2/api/json",
+			wantKey: "https://ci.example.com/team-a",
+			wantTok: "tok-a",
+			wantOK:  true,
+		},
+		{
+			name:    "sibling context path selects its own entry",
+			reqURL:  "https://ci.example.com/team-b/job/svc/build",
+			wantKey: "https://ci.example.com/team-b",
+			wantTok: "tok-b",
+			wantOK:  true,
+		},
+		{
+			name:    "fallback to host-only for an unknown context path",
+			reqURL:  "https://ci.example.com/team-z/job/x/",
+			wantKey: "https://ci.example.com",
+			wantTok: "tok-root",
+			wantOK:  true,
+		},
+		{
+			name:    "exact-path match for a crumb endpoint (no /job/ delimiter)",
+			reqURL:  "https://ci.example.com/team-a/crumbIssuer/api/json",
+			wantKey: "https://ci.example.com/team-a",
+			wantTok: "tok-a",
+			wantOK:  true,
+		},
+		{
+			name:    "exact path equality matches",
+			reqURL:  "https://ci.example.com/team-a",
+			wantKey: "https://ci.example.com/team-a",
+			wantTok: "tok-a",
+			wantOK:  true,
+		},
+		{
+			name:    "segment-boundary prefix still matches at the boundary",
+			reqURL:  "https://seg.example.com/team-a/job/x/",
+			wantKey: "https://seg.example.com/team-a",
+			wantTok: "tok-seg",
+			wantOK:  true,
+		},
+		{
+			name:   "segment boundary: /team-a must not match /team-amber",
+			reqURL: "https://seg.example.com/team-amber/job/x/",
+			wantOK: false,
+		},
+		{
+			name:   "no host match returns ok=false",
+			reqURL: "https://nope.example.com/job/x/",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newStore(t)
+			for _, sd := range seeds {
+				if err := s.Add(sd.key, sd.cred); err != nil {
+					t.Fatalf("seed Add %q: %v", sd.key, err)
+				}
+			}
+			key, got, ok, err := s.Resolve(mustParseURL(t, tc.reqURL))
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("Resolve ok = %v, want %v (key=%q)", ok, tc.wantOK, key)
+			}
+			if !tc.wantOK {
+				return
+			}
+			if key != tc.wantKey {
+				t.Errorf("Resolve key = %q, want %q", key, tc.wantKey)
+			}
+			if got.Token != tc.wantTok {
+				t.Errorf("Resolve token = %q, want %q", got.Token, tc.wantTok)
+			}
+		})
+	}
+}
+
+// Test_Store_Resolve_EmptyStore confirms a request against a store with no
+// entries reports no match rather than erroring.
+func Test_Store_Resolve_EmptyStore(t *testing.T) {
+	s, _ := newStore(t)
+	_, _, ok, err := s.Resolve(mustParseURL(t, "https://ci.example.com/job/x/"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if ok {
+		t.Error("expected ok=false for empty store")
+	}
+}
+
+// Test_Store_Resolve_StripsDefaultPort verifies a request carrying the
+// scheme's default port resolves a credential stored without the port, so
+// the transport's host normalization is honored inside the store.
+func Test_Store_Resolve_StripsDefaultPort(t *testing.T) {
+	s, _ := newStore(t)
+	if err := s.Add("https://ci.example.com/team-a", auth.Credential{Username: "u", Token: "t"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	key, _, ok, err := s.Resolve(mustParseURL(t, "https://ci.example.com:443/team-a/job/x/"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !ok || key != "https://ci.example.com/team-a" {
+		t.Errorf("Resolve = (%q, ok=%v), want (https://ci.example.com/team-a, true)", key, ok)
 	}
 }
 
