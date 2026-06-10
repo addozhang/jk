@@ -123,6 +123,15 @@ func NewNotFound(pipelineURL string) *JKError {
 	}
 }
 
+// NewBuildNotFound is returned for HTTP 404 against a build URL.
+func NewBuildNotFound(buildURL string) *JKError {
+	return &JKError{
+		Code:       "not_found",
+		Message:    fmt.Sprintf("Build not found: %s.", buildURL),
+		Suggestion: "Check the build number or list recent builds with: jk build status <pipeline-url>.",
+	}
+}
+
 // NewTimeout is returned when a request exceeds the configured timeout.
 func NewTimeout(host string, timeout time.Duration) *JKError {
 	return &JKError{

@@ -122,7 +122,7 @@ func runBuildTrigger(cmd *cobra.Command, flags *GlobalFlags, rawURL string, para
 	queueLoc, err := cc.client.TriggerBuild(triggerCtx, ref, paramMap)
 	cancelTrigger()
 	if err != nil {
-		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
+		return translateBuildClientError(ref.Host, rawURL, flags.Timeout, err)
 	}
 
 	queueID, err := extractQueueID(queueLoc)
@@ -140,7 +140,7 @@ func runBuildTrigger(cmd *cobra.Command, flags *GlobalFlags, rawURL string, para
 	}
 	buildURL, buildNumber, err := cc.client.ResolveQueueItem(cmd.Context(), queueLoc, queueTimeout)
 	if err != nil {
-		return translateClientError(ref.Host, rawURL, queueTimeout, err)
+		return translateBuildClientError(ref.Host, rawURL, queueTimeout, err)
 	}
 
 	out := schema.BuildTrigger{
@@ -172,7 +172,7 @@ func validateParamNames(ctx context.Context, cc *commandContext, ref *jenkinsurl
 	defer cancel()
 	body, err := cc.client.GetPipelineParams(probeCtx, ref)
 	if err != nil {
-		return translateClientError(ref.Host, rawURL, timeout, err)
+		return translateBuildClientError(ref.Host, rawURL, timeout, err)
 	}
 	defs, err := schema.MapPipelineParams(body)
 	if err != nil {
@@ -248,7 +248,7 @@ func runBuildStatus(cmd *cobra.Command, flags *GlobalFlags, rawURL string) error
 
 	body, err := cc.client.GetBuildStatus(ctx, ref)
 	if err != nil {
-		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
+		return translateBuildClientError(ref.Host, rawURL, flags.Timeout, err)
 	}
 	status, err := schema.MapBuildStatus(body)
 	if err != nil {
@@ -355,7 +355,7 @@ func runBuildParams(cmd *cobra.Command, flags *GlobalFlags, rawURL string) error
 
 	body, err := cc.client.GetBuildParams(ctx, ref)
 	if err != nil {
-		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
+		return translateBuildClientError(ref.Host, rawURL, flags.Timeout, err)
 	}
 	params, err := schema.MapBuildParams(body)
 	if err != nil {
@@ -397,7 +397,7 @@ func runBuildStages(cmd *cobra.Command, flags *GlobalFlags, rawURL string) error
 
 	body, err := cc.client.GetBuildStages(ctx, ref)
 	if err != nil {
-		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
+		return translateBuildClientError(ref.Host, rawURL, flags.Timeout, err)
 	}
 	stages, err := schema.MapBuildStages(body)
 	if err != nil {
@@ -487,7 +487,7 @@ func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, input
 	pendingBody, err := cc.client.GetPendingInputs(probeCtx, ref)
 	cancelProbe()
 	if err != nil {
-		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
+		return translateBuildClientError(ref.Host, rawURL, flags.Timeout, err)
 	}
 	pending, err := decodePendingInputList(pendingBody)
 	if err != nil {
@@ -517,7 +517,7 @@ func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, input
 	submitCtx, cancelSubmit := cc.withTimeout(cmd.Context())
 	defer cancelSubmit()
 	if err = cc.client.SubmitInput(submitCtx, ref, resolvedID, proceed, proceedText, proceedURL, submitParams); err != nil {
-		return translateClientError(ref.Host, rawURL, flags.Timeout, err)
+		return translateBuildClientError(ref.Host, rawURL, flags.Timeout, err)
 	}
 
 	// After submission, the build state is briefly indeterminate. The
@@ -889,14 +889,14 @@ func runBuildLogs(cmd *cobra.Command, flags *GlobalFlags, rawURL string, follow 
 	if !follow {
 		streamCtx, cancel := cc.withTimeout(cmd.Context())
 		defer cancel()
-		return translateClientError(ref.Host, rawURL, flags.Timeout,
+		return translateBuildClientError(ref.Host, rawURL, flags.Timeout,
 			cc.client.StreamConsoleLog(streamCtx, ref, stdout, false))
 	}
 	// Follow mode: stream until the build is no longer in-flight.
 	// StreamConsoleLog(follow=true) polls /logText/progressiveText
 	// until X-More-Data is absent — Jenkins clears that header at
 	// the moment of completion, so a single call suffices.
-	return translateClientError(ref.Host, rawURL, flags.Timeout,
+	return translateBuildClientError(ref.Host, rawURL, flags.Timeout,
 		cc.client.StreamConsoleLog(cmd.Context(), ref, stdout, true))
 }
 
@@ -909,7 +909,7 @@ func runBuildStageLog(cmd *cobra.Command, cc *commandContext, ref *jenkinsurl.Re
 	stagesBody, err := cc.client.GetBuildStages(stagesCtx, ref)
 	cancelStages()
 	if err != nil {
-		return translateClientError(ref.Host, rawURL, timeout, err)
+		return translateBuildClientError(ref.Host, rawURL, timeout, err)
 	}
 	var src struct {
 		Stages []stageNode `json:"stages"`
@@ -935,7 +935,7 @@ func runBuildStageLog(cmd *cobra.Command, cc *commandContext, ref *jenkinsurl.Re
 	nodeBody, err := cc.client.GetNodeDescribe(nodeCtx, ref, flowID)
 	cancelNode()
 	if err != nil {
-		return translateClientError(ref.Host, rawURL, timeout, err)
+		return translateBuildClientError(ref.Host, rawURL, timeout, err)
 	}
 	var nodeSrc struct {
 		StageFlowNodes []struct {
@@ -965,7 +965,7 @@ func runBuildStageLog(cmd *cobra.Command, cc *commandContext, ref *jenkinsurl.Re
 		logBody, lerr := cc.client.GetStageLog(logCtx, ref, id)
 		cancelLog()
 		if lerr != nil {
-			return translateClientError(ref.Host, rawURL, timeout, lerr)
+			return translateBuildClientError(ref.Host, rawURL, timeout, lerr)
 		}
 		// wfapi log responses wrap the text in {"text": "..."} along
 		// with metadata. Extract the text field; if the response is
@@ -1058,7 +1058,7 @@ func watchBuild(ctx context.Context, cc *commandContext, buildRef *jenkinsurl.Re
 		body, err := cc.client.GetBuildStatus(pollCtx, buildRef)
 		cancel()
 		if err != nil {
-			return translateClientError(buildRef.Host, buildURL, timeout, err)
+			return translateBuildClientError(buildRef.Host, buildURL, timeout, err)
 		}
 		status, err := schema.MapBuildStatus(body)
 		if err != nil {

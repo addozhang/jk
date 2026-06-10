@@ -132,6 +132,25 @@ func (cc *commandContext) render(v any) error {
 // pipelineURL is the user-facing URL the command was operating on; it is
 // embedded into the not_found message so the user can copy-paste it.
 func translateClientError(host, pipelineURL string, timeout time.Duration, err error) error {
+	return translateError(host, timeout, err, func() error {
+		return jkerrors.NewNotFound(pipelineURL)
+	})
+}
+
+// translateBuildClientError is like translateClientError but produces a
+// build-specific not_found message when Jenkins returns 404. Use this
+// in all build subcommands so that a missing build number yields
+// "Build not found" rather than the pipeline-oriented "Pipeline not found".
+func translateBuildClientError(host, buildURL string, timeout time.Duration, err error) error {
+	return translateError(host, timeout, err, func() error {
+		return jkerrors.NewBuildNotFound(buildURL)
+	})
+}
+
+// translateError is the shared core of translateClientError and
+// translateBuildClientError. notFoundFn is called only when the HTTP
+// status is 404, letting each caller supply the right error message.
+func translateError(host string, timeout time.Duration, err error, notFoundFn func() error) error {
 	if err == nil {
 		return nil
 	}
@@ -151,7 +170,7 @@ func translateClientError(host, pipelineURL string, timeout time.Duration, err e
 		case 401, 403:
 			return jkerrors.NewAuthRejected(host)
 		case 404:
-			return jkerrors.NewNotFound(pipelineURL)
+			return notFoundFn()
 		default:
 			return jkerrors.NewMalformedResponse(host, err)
 		}
