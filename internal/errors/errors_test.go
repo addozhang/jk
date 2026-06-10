@@ -75,6 +75,20 @@ func Test_NewNotFound_MatchesSpecPhrasing(t *testing.T) {
 	}
 }
 
+func Test_NewBuildNotFound_MatchesSpecPhrasing(t *testing.T) {
+	u := "http://localhost:8080/job/demo-pipeline/6/"
+	e := jkerrors.NewBuildNotFound(u)
+	if !contains(e.Error(), "Build not found: "+u) {
+		t.Errorf("missing 'Build not found' phrasing in %q", e.Error())
+	}
+	if !contains(e.Error(), "jk build status") {
+		t.Errorf("missing 'jk build status' hint in %q", e.Error())
+	}
+	if e.Code != "not_found" {
+		t.Errorf("Code = %q, want not_found", e.Code)
+	}
+}
+
 func Test_NewTimeout_IncludesDurationAndHost(t *testing.T) {
 	e := jkerrors.NewTimeout("https://jenkins.example.com", 30*time.Second)
 	if !contains(e.Error(), "30s") {
