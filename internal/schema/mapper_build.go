@@ -136,6 +136,23 @@ func MapBuildStatus(raw []byte) (BuildStatus, error) {
 	return out, nil
 }
 
+// MapBuildCancel converts a build's `api/json` response into a
+// schema.BuildCancel. It is a thin projection over MapBuildStatus:
+// the cancel command only needs the URL, number, and the state at the
+// moment the stop request was made, so we reuse the authoritative
+// state-derivation logic rather than re-deriving it.
+func MapBuildCancel(raw []byte) (BuildCancel, error) {
+	status, err := MapBuildStatus(raw)
+	if err != nil {
+		return BuildCancel{}, err
+	}
+	return BuildCancel{
+		BuildURL:    status.BuildURL,
+		BuildNumber: status.BuildNumber,
+		State:       status.State,
+	}, nil
+}
+
 // HasPendingInputMarker reports whether the core /api/json response
 // for a build carries an InputAction entry in its actions[] array.
 // This is the *presence bit* only — the populated fields

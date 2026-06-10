@@ -356,3 +356,21 @@ type BuildInputResult struct {
 	// State is the build state immediately after submission.
 	State BuildState `json:"state"`
 }
+
+// ---------------------------------------------------------------------------
+// Build cancel
+// ---------------------------------------------------------------------------
+
+// BuildCancel is the response of `jk build cancel` (without --wait). It
+// confirms the stop request was accepted and reports the build state at
+// the moment of the request. Because Jenkins stops a build
+// asynchronously, State MAY still be RUNNING here; callers wanting the
+// terminal state should use --wait. Stability: experimental.
+type BuildCancel struct {
+	// BuildURL is the canonical Jenkins URL of the build.
+	BuildURL string `json:"buildUrl"`
+	// BuildNumber is the resolved numeric build number.
+	BuildNumber int `json:"buildNumber"`
+	// State is the build state at the time the stop request was made.
+	State BuildState `json:"state"`
+}

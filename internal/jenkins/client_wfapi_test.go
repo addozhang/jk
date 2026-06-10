@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -261,6 +262,55 @@ func Test_Client_SubmitInput_AbortIgnoresParameters(t *testing.T) {
 	}
 	if !abortHit {
 		t.Error("expected /abort to be hit even with parameters supplied")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CancelBuild
+// ---------------------------------------------------------------------------
+
+func Test_Client_CancelBuild(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+
+	stopHit := false
+	rec.handle("/job/svc/42/stop", func(w http.ResponseWriter, r *http.Request) {
+		stopHit = true
+		if r.Method != http.MethodPost {
+			t.Errorf("method=%s, want POST", r.Method)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	ref := mustParseRef(t, srv.URL+"/job/svc/42")
+	if err := client.CancelBuild(context.Background(), ref); err != nil {
+		t.Fatalf("CancelBuild: %v", err)
+	}
+	if !stopHit {
+		t.Error("expected /stop endpoint to be hit")
+	}
+}
+
+// A 404 from /stop means the build URL is wrong; CancelBuild surfaces
+// it as HTTPStatusError so the CLI layer can map it to a not_found
+// error.
+func Test_Client_CancelBuild_NotFound(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+
+	rec.handle("/job/svc/999/stop", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	ref := mustParseRef(t, srv.URL+"/job/svc/999")
+	err := client.CancelBuild(context.Background(), ref)
+	if err == nil {
+		t.Fatal("expected error for 404, got nil")
+	}
+	var hse *jenkins.HTTPStatusError
+	if !errors.As(err, &hse) {
+		t.Fatalf("error type=%T, want *HTTPStatusError", err)
+	}
+	if hse.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode=%d, want 404", hse.StatusCode)
 	}
 }
 

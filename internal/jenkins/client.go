@@ -470,6 +470,35 @@ func (c *Client) postSubmitInput(ctx context.Context, ref *jenkinsurl.Ref, input
 	return nil
 }
 
+// CancelBuild requests Jenkins to stop a running build by POSTing to
+// the build's `/stop` endpoint — the same action the UI "Stop" button
+// performs. Jenkins marks the build ABORTED asynchronously and runs
+// any `post { always {} }` cleanup blocks.
+//
+// Jenkins returns HTTP 200 even when the build has already finished,
+// so this method does not special-case the "already done" state; a
+// 404 means the build URL is wrong and surfaces as HTTPStatusError.
+func (c *Client) CancelBuild(ctx context.Context, ref *jenkinsurl.Ref) error {
+	if ref.BuildNumber == 0 && ref.BuildPermalink == "" {
+		return errors.New("jenkins: CancelBuild requires a Ref with a non-zero BuildNumber or a BuildPermalink")
+	}
+	endpoint := ref.APIPath("stop")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("jenkins: CancelBuild: build request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer closeBody(resp.Body)
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20)) //nolint:errcheck // best-effort drain
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &HTTPStatusError{URL: endpoint, StatusCode: resp.StatusCode, Status: resp.Status}
+	}
+	return nil
+}
+
 // GetStageLog returns the raw stage-log JSON for a single stage,
 // addressed by its flowNodeID (extracted upstream from the
 // wfapi/describe response). Returns raw bytes; the mapper extracts the
