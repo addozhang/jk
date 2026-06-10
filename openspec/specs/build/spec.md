@@ -28,7 +28,7 @@ The system SHALL provide a `jk build trigger <url> [-p KEY=VALUE ...]` command t
 
 ### Requirement: Watch a triggered build until completion
 
-The system SHALL support a `--watch` flag on `jk build trigger` that polls the build's status after triggering and exits when the build reaches a terminal state. The process exit code MUST encode the build result: `0` for `SUCCESS`, `1` for `FAILURE`, `2` for `UNSTABLE`, `3` for `ABORTED`, `4` for `PENDING_INPUT`, and a value `>= 10` for any internal error of `jk` itself. The polling interval MUST start at 2 seconds and back off to a maximum of 10 seconds after one minute of polling.
+The system SHALL support a `--watch` flag on `jk build trigger` that polls the build's status after triggering and exits when the build reaches a terminal state. The process exit code MUST encode the build result: `0` for `SUCCESS`, `1` for `FAILURE`, `2` for `UNSTABLE`, `3` for `ABORTED`, `4` for `PENDING_INPUT`, and a value `>= 10` for any internal error of `jk` itself. The polling interval MUST start at 2 seconds and back off to a maximum of 10 seconds after one minute of polling. The same exit code semantics MUST apply to `jk build cancel --wait`.
 
 #### Scenario: Watch a build that succeeds
 - **WHEN** the user runs `jk build trigger <url> --watch` and the build eventually finishes with result `SUCCESS`
@@ -246,3 +246,27 @@ The system SHALL provide a `jk build params <build-url>` command that returns th
 #### Scenario: Pipeline that has never been built
 - **WHEN** the user runs `jk build params http://jenkins.foo.com/job/new-svc/lastBuild/` against a pipeline that has never built
 - **THEN** the command surfaces the Jenkins HTTP 404 as an error
+
+### Requirement: Cancel a running build
+
+The system SHALL provide a `jk build cancel <build-url>` command that requests Jenkins to stop the specified build. The command MUST POST to the Jenkins `/stop` endpoint and return a YAML document confirming the cancellation request was accepted. The command MUST accept a `--wait` flag that polls the build status until the build reaches a terminal state before exiting. The command MUST accept a build permalink (e.g. `lastBuild`) in the build-position slot.
+
+#### Scenario: Cancel a running build without --wait
+- **WHEN** the user runs `jk build cancel http://jenkins/job/svc/42/`
+- **THEN** the command POSTs to `http://jenkins/job/svc/42/stop`, receives HTTP 200, and returns a YAML document containing `schemaVersion`, `buildUrl`, `buildNumber`, and `state` reflecting the build state at the time of the request
+
+#### Scenario: Cancel a running build with --wait
+- **WHEN** the user runs `jk build cancel http://jenkins/job/svc/42/ --wait`
+- **THEN** the command POSTs to the stop endpoint and then polls the build status until it reaches a terminal state, exiting with code `3` once the build is `ABORTED`
+
+#### Scenario: Cancel with a non-existent build URL
+- **WHEN** the user runs `jk build cancel` with a URL whose build number does not exist
+- **THEN** the command exits with a non-zero code and prints a `Build not found` error with a suggestion to check the build number
+
+#### Scenario: Cancel a build that has already finished
+- **WHEN** the user runs `jk build cancel` against a build that has already completed
+- **THEN** the command succeeds (Jenkins returns HTTP 200) and the returned YAML reflects the terminal state of the build
+
+#### Scenario: Cancel a build addressed by permalink
+- **WHEN** the user runs `jk build cancel http://jenkins/job/svc/lastBuild/`
+- **THEN** the command POSTs to `.../lastBuild/stop` and reports the resolved numeric build number in the output
