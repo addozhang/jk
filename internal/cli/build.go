@@ -55,6 +55,7 @@ func newBuildCommand(flags *GlobalFlags) *cobra.Command {
 		newBuildParamsCommand(flags),
 		newBuildStagesCommand(flags),
 		newBuildInputCommand(flags),
+		newBuildCancelCommand(flags),
 		newBuildLogsCommand(flags),
 	)
 	return cmd
@@ -544,6 +545,85 @@ func runBuildInput(cmd *cobra.Command, flags *GlobalFlags, rawURL, action, input
 		result.Action = schema.InputActionAbort
 	}
 	return cc.render(result)
+}
+
+// ---------------------------------------------------------------------------
+// jk build cancel <build-url> [--wait]
+// ---------------------------------------------------------------------------
+
+func newBuildCancelCommand(flags *GlobalFlags) *cobra.Command {
+	var wait bool
+	cmd := &cobra.Command{
+		Use:   "cancel <build-url>",
+		Short: "Stop a running build",
+		Long: `Request Jenkins to stop the build at <build-url>. This performs the
+same action as the UI "Stop" button: the build is marked ABORTED and
+any post { always {} } cleanup blocks still run.
+
+Cancellation is asynchronous. Without --wait the returned state
+reflects the build state at the moment the stop request was made,
+which MAY still be RUNNING. With --wait the command polls until the
+build reaches a terminal state and exits with a code derived from that
+state (3 for ABORTED).
+
+See specs/build-cancel.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBuildCancel(cmd, flags, args[0], wait)
+		},
+	}
+	cmd.Flags().BoolVar(&wait, "wait", false, "poll the build until it reaches a terminal state and exit with a code per terminal state")
+	return cmd
+}
+
+func runBuildCancel(cmd *cobra.Command, flags *GlobalFlags, rawURL string, wait bool) error {
+	ref, err := resolveBuildRef(rawURL)
+	if err != nil {
+		return err
+	}
+	cc, err := newCommandContext(cmd, flags)
+	if err != nil {
+		return err
+	}
+
+	cancelCtx, cancelStop := cc.withTimeout(cmd.Context())
+	err = cc.client.CancelBuild(cancelCtx, ref)
+	cancelStop()
+	if err != nil {
+		return translateBuildClientError(ref.Host, rawURL, flags.Timeout, err)
+	}
+
+	// With --wait, poll until the build is terminal and let the
+	// resulting exit code (3 = ABORTED) propagate. waitForBuildDone
+	// emits progress to stderr; no separate YAML document is rendered
+	// in this mode, mirroring `build trigger --watch`.
+	//
+	// We deliberately do NOT reuse watchBuild here: it treats
+	// PENDING_INPUT as terminal (exit 4), which is correct for trigger
+	// but wrong for cancel — a build being aborted may briefly still
+	// report PENDING_INPUT before Jenkins records ABORTED.
+	if wait {
+		return waitForBuildDone(cmd.Context(), cc, ref, rawURL, flags.Timeout)
+	}
+
+	// Without --wait, re-fetch /api/json so the reported state and
+	// build number are authoritative rather than synthesized. The stop
+	// request already succeeded, so a status fetch failure is
+	// non-fatal: fall back to a best-effort document reporting RUNNING
+	// (the most likely state right after the request).
+	statusCtx, cancelStatus := cc.withTimeout(cmd.Context())
+	defer cancelStatus()
+	if statusBody, sErr := cc.client.GetBuildStatus(statusCtx, ref); sErr == nil {
+		if c, mErr := schema.MapBuildCancel(statusBody); mErr == nil {
+			return cc.render(c)
+		}
+	}
+
+	return cc.render(schema.BuildCancel{
+		BuildURL:    rawURL,
+		BuildNumber: ref.BuildNumber,
+		State:       schema.BuildStateRunning,
+	})
 }
 
 // pendingInputItem is the minimal shape we need to disambiguate and
@@ -1103,6 +1183,46 @@ func watchBuild(ctx context.Context, cc *commandContext, buildRef *jenkinsurl.Re
 	}
 }
 
+// waitForBuildDone polls /api/json on buildRef until State becomes DONE
+// and returns a [*BuildResultExitError] carrying the per-result exit
+// code. Unlike watchBuild it does NOT treat PENDING_INPUT as terminal:
+// `cancel --wait` must keep polling through the brief window where a
+// build being aborted still reports PENDING_INPUT, until Jenkins
+// records the final ABORTED result (exit 3).
+//
+// It shares watchPollIntervalFor (2s→10s cadence) and buildResultToExit
+// (exit-code mapping) with watchBuild to keep behaviour consistent
+// where it should be. Progress lines go to stderr.
+func waitForBuildDone(ctx context.Context, cc *commandContext, buildRef *jenkinsurl.Ref, buildURL string, timeout time.Duration) error {
+	start := time.Now()
+	for {
+		pollCtx, cancel := context.WithTimeout(ctx, timeout)
+		body, err := cc.client.GetBuildStatus(pollCtx, buildRef)
+		cancel()
+		if err != nil {
+			return translateBuildClientError(buildRef.Host, buildURL, timeout, err)
+		}
+		status, err := schema.MapBuildStatus(body)
+		if err != nil {
+			return jkerrors.NewMalformedResponse(buildRef.Host, err)
+		}
+		//nolint:errcheck // best-effort progress write to stderr
+		fmt.Fprintf(cc.stderr, "build %s: state=%s progress=%d%%\n",
+			buildURL, status.State, status.ProgressPercent)
+
+		if status.State == schema.BuildStateDone {
+			return buildResultToExit(status.Result)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(watchPollIntervalFor(time.Since(start))):
+			// next iteration
+		}
+	}
+}
+
 // buildResultToExit maps a terminal BuildResult to the matching exit
 // code error. nil or unrecognized results fall back to FAILURE (1)
 // since "Jenkins reports done but produced no result" is an error
@@ -1165,6 +1285,7 @@ type buildClientSurface interface {
 	GetBuildStages(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetPendingInputs(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, proceedText, proceedURL string, parameters []jenkins.InputParameterValue) error
+	CancelBuild(ctx context.Context, ref *jenkinsurl.Ref) error
 	StreamConsoleLog(ctx context.Context, ref *jenkinsurl.Ref, w io.Writer, follow bool) error
 	GetStageLog(ctx context.Context, ref *jenkinsurl.Ref, flowNodeID string) ([]byte, error)
 	GetNodeDescribe(ctx context.Context, ref *jenkinsurl.Ref, flowNodeID string) ([]byte, error)

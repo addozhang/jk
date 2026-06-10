@@ -841,3 +841,62 @@ func Test_MapBuildParams_MultipleActionsLastWriteWins(t *testing.T) {
 		t.Errorf("REGION: want us-east-1, got %v", values["REGION"])
 	}
 }
+
+// MapBuildCancel projects a running build's status onto BuildCancel.
+// State reflects the build state at the moment cancel was requested,
+// so a still-running build yields RUNNING.
+func Test_MapBuildCancel_RunningBuild(t *testing.T) {
+	raw := []byte(`{
+		"number":42,
+		"url":"http://jenkins.example/job/svc/42/",
+		"result":null,
+		"building":true,
+		"timestamp":1700000000000,
+		"duration":5000,
+		"estimatedDuration":60000
+	}`)
+
+	got, err := schema.MapBuildCancel(raw)
+	if err != nil {
+		t.Fatalf("MapBuildCancel: %v", err)
+	}
+	if got.BuildNumber != 42 {
+		t.Errorf("BuildNumber=%d, want 42", got.BuildNumber)
+	}
+	if got.BuildURL != "http://jenkins.example/job/svc/42/" {
+		t.Errorf("BuildURL=%q, unexpected", got.BuildURL)
+	}
+	if got.State != schema.BuildStateRunning {
+		t.Errorf("State=%q, want RUNNING", got.State)
+	}
+}
+
+// When cancel is invoked against an already-finished build, the
+// projected state is DONE (with whatever result Jenkins recorded).
+func Test_MapBuildCancel_AlreadyDone(t *testing.T) {
+	raw := []byte(`{
+		"number":42,
+		"url":"http://jenkins.example/job/svc/42/",
+		"result":"ABORTED",
+		"building":false,
+		"timestamp":1700000000000,
+		"duration":12000,
+		"estimatedDuration":60000
+	}`)
+
+	got, err := schema.MapBuildCancel(raw)
+	if err != nil {
+		t.Fatalf("MapBuildCancel: %v", err)
+	}
+	if got.State != schema.BuildStateDone {
+		t.Errorf("State=%q, want DONE", got.State)
+	}
+}
+
+// Malformed JSON propagates the underlying MapBuildStatus error.
+func Test_MapBuildCancel_MalformedJSON(t *testing.T) {
+	_, err := schema.MapBuildCancel([]byte(`{not json`))
+	if err == nil {
+		t.Fatal("expected error for malformed JSON, got nil")
+	}
+}

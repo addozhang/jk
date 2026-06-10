@@ -1239,6 +1239,166 @@ func Test_BuildInput_UsesWfapiProceedURL(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 14.5 build cancel
+// ---------------------------------------------------------------------------
+
+// Scenario: "Cancel a running build without --wait" — POST /stop,
+// then re-fetch /api/json; output carries the state at request time.
+func Test_BuildCancel_RunningNoWait(t *testing.T) {
+	stopHit := false
+	srv := newMux(t).
+		handle("/job/svc/42/stop", func(w http.ResponseWriter, r *http.Request) {
+			stopHit = true
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST, got %s", r.Method)
+			}
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/42/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":42,"url":"http://example/job/svc/42/",
+				"building":true,"result":null,
+				"timestamp":1700000000000,
+				"duration":5000,"estimatedDuration":60000,
+				"actions":[]
+			}`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "cancel", srv.URL + "/job/svc/42/"})
+	if err != nil {
+		t.Fatalf("build cancel: %v", err)
+	}
+	if !stopHit {
+		t.Error("expected /stop to be hit")
+	}
+	for _, want := range []string{
+		`schemaVersion: "1"`,
+		"buildNumber: 42",
+		"state: RUNNING",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// A 404 from /stop means the build URL is wrong; the command MUST exit
+// non-zero with a "Build not found" error (not "Pipeline not found").
+func Test_BuildCancel_NotFound(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/999/stop", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "cancel", srv.URL + "/job/svc/999/"})
+	if err == nil {
+		t.Fatal("expected not_found error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Build not found") {
+		t.Errorf("error must say 'Build not found': %v", err)
+	}
+}
+
+// Missing build number must be rejected by the resolveBuildRef gate
+// before any HTTP call.
+func Test_BuildCancel_MissingBuildNumber(t *testing.T) {
+	_, _, err := runJK(t, []string{"build", "cancel", "https://jenkins.example/job/svc/"})
+	if err == nil {
+		t.Fatal("expected missing-build-number error")
+	}
+	if !strings.Contains(err.Error(), "build number") {
+		t.Errorf("error must mention build number: %v", err)
+	}
+}
+
+// cancel MUST accept a permalink (e.g. lastBuild) in the build slot,
+// mirroring build status/params. The /stop POST is addressed at the
+// permalink and the re-fetched status reports the resolved number.
+func Test_BuildCancel_AcceptsPermalink(t *testing.T) {
+	stopHit := false
+	srv := newMux(t).
+		handle("/job/svc/lastBuild/stop", func(w http.ResponseWriter, r *http.Request) {
+			stopHit = true
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST, got %s", r.Method)
+			}
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/lastBuild/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"number":42,"url":"http://example/job/svc/42/",
+				"building":true,"result":null,
+				"timestamp":1700000000000,
+				"duration":5000,"estimatedDuration":60000,
+				"actions":[]
+			}`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "cancel", srv.URL + "/job/svc/lastBuild/"})
+	if err != nil {
+		t.Fatalf("build cancel (permalink): %v", err)
+	}
+	if !stopHit {
+		t.Error("expected /lastBuild/stop to be hit")
+	}
+	if !strings.Contains(stdout, "buildNumber: 42") {
+		t.Errorf("output must report the resolved build number:\n%s", stdout)
+	}
+}
+
+// Scenario: "Cancel a running build with --wait" — after POST /stop,
+// the command polls until DONE and exits with code 3 (ABORTED). The
+// poll passes through PENDING_INPUT without treating it as terminal.
+func Test_BuildCancel_WaitExitsAborted(t *testing.T) {
+	withFastWatchPoll(t)
+	var polls int32
+	srv := newMux(t).
+		handle("/job/svc/42/stop", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}).
+		handle("/job/svc/42/api/json", func(w http.ResponseWriter, r *http.Request) {
+			n := atomic.AddInt32(&polls, 1)
+			// First poll: still paused on input (must NOT be treated
+			// as terminal). Second poll: aborted.
+			if n == 1 {
+				fmt.Fprintf(w, `{
+					"number":42,"url":"http://%s/job/svc/42/",
+					"building":true,"result":null,
+					"timestamp":1700000000000,
+					"duration":5000,"estimatedDuration":-1,
+					"actions":[{
+						"_class":"org.jenkinsci.plugins.workflow.support.steps.input.InputAction"
+					}]
+				}`, r.Host)
+				return
+			}
+			fmt.Fprintf(w, `{
+				"number":42,"url":"http://%s/job/svc/42/",
+				"building":false,"result":"ABORTED",
+				"timestamp":1700000000000,
+				"duration":8000,"estimatedDuration":-1,
+				"actions":[]
+			}`, r.Host)
+		}).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "cancel", srv.URL + "/job/svc/42/", "--wait"})
+	if code := jkerrors.ExitCode(err); code != 3 {
+		t.Errorf("exit code = %d, want 3 (ABORTED), err=%v", code, err)
+	}
+	if atomic.LoadInt32(&polls) < 2 {
+		t.Errorf("expected at least 2 status polls (pass through PENDING_INPUT), got %d", polls)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 14.6 build logs
 // ---------------------------------------------------------------------------
 
