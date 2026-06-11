@@ -41,6 +41,7 @@ jk build params <build-url> -o json
 jk build stages <build-url> -o json
 jk build logs <build-url> [--stage NAME] [-f]
 jk build input <build-url> proceed|abort [--input-id ID] [-p KEY=VALUE ...]
+jk build cancel <build-url> [--wait]
 ```
 
 ## URL Handling
@@ -137,9 +138,21 @@ jk build status <build-url> -o json
 After confirming the pendingInput details, ask the user to explicitly confirm proceed before running jk build input ... proceed.
 ```
 
-### Discover Pipelines in a Folder
+### Cancel a Running Build
 
-Use folder URLs with `pipeline list`:
+Use `jk build cancel` to stop a running build — the equivalent of the Jenkins UI Stop button. The build is marked ABORTED after Jenkins completes any cleanup blocks.
+
+```sh
+# Stop immediately, see state at the moment of the request
+jk build cancel https://jenkins.example.com/job/deploy/42
+
+# Stop and wait until ABORTED; exits with code 3
+jk build cancel https://jenkins.example.com/job/deploy/42 --wait
+```
+
+Confirm with the user before cancelling a production or long-running build unless they have explicitly requested it. After cancellation, verify with `jk build status` if needed.
+
+### Discover Pipelines in a FolderUse folder URLs with `pipeline list`:
 
 ```sh
 jk pipeline list https://jenkins.example.com/job/platform/ -o json
@@ -193,6 +206,7 @@ State-changing commands need clear user intent:
 ```sh
 jk build trigger ...
 jk build input ... proceed|abort
+jk build cancel ...
 jk auth add ... --force
 jk auth remove ...
 ```
