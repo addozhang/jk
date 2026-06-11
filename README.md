@@ -58,7 +58,10 @@ jk build logs https://jenkins.example.com/job/my-folder/job/my-pipeline/lastBuil
 jk build input https://jenkins.example.com/job/deploy/42 proceed \
     -p ENV=prod -p DRY_RUN=false
 
-# 6. Inspect the parameter values a build was triggered with
+# 6. Cancel a running build
+jk build cancel https://jenkins.example.com/job/deploy/42 --wait
+
+# 7. Inspect the parameter values a build was triggered with
 jk build params https://jenkins.example.com/job/my-pipeline/lastSuccessfulBuild
 ```
 
@@ -149,7 +152,7 @@ jk build status https://host/job/pipeline/lastBuild -o json | jq '.pendingInput'
 
 When `--watch` is **not** used, `jk` exits `0` on success or `10` on any jk-level error (bad URL, auth failure, network problem, TLS verification failure, CSRF crumb failure, malformed Jenkins response). The stderr message identifies which.
 
-When `--watch` **is** used with `jk build trigger`, the exit code reflects the build's terminal state:
+When `--watch` **is** used with `jk build trigger`, or `--wait` is used with `jk build cancel`, the exit code reflects the build's terminal state:
 
 | Code | Meaning |
 |------|---------|
@@ -177,6 +180,20 @@ schema=$(jk pipeline info https://host/job/foo -o json | jq -r '.schemaVersion')
 Breaking changes will increment the version; additive changes (new fields, new enum values tagged `experimental`) will not. See [`docs/schema.md`](./docs/schema.md) for the full field reference and versioning policy.
 
 ## Release notes
+
+### v0.6.0 — build cancel
+
+**New features**
+
+- `jk build cancel <build-url>` stops a running build via the Jenkins `/stop` endpoint — the same action as the UI Stop button. The build is marked `ABORTED` after any `post { always {} }` cleanup blocks run.
+- `--wait` flag polls the build until it reaches a terminal state and exits with the build-result exit code (`3` for `ABORTED`). The poll correctly passes through the brief `PENDING_INPUT` window that occurs while Jenkins is processing the stop request, rather than treating it as a terminal state.
+- Accepts build permalinks (`lastBuild`, etc.) in the build-position slot, consistent with all other build commands.
+
+### v0.5.1 — error message fix
+
+**Bug fixes**
+
+- Build commands now report `Build not found: <url>` (with a suggestion to check the build number) instead of the misleading `Pipeline not found` message when Jenkins returns HTTP 404 for a build URL.
 
 ### v0.2.0 — input-step parameters and status correctness
 
