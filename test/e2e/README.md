@@ -63,4 +63,4 @@ Set them when running against a Jenkins started outside of compose
 
 ## Security note
 
-The committed `.env` contains a fixed admin password, and `nginx/server.crt` + `nginx/server.key` are a self-signed TLS pair for `localhost`. Both are safe only because the Jenkins server is local, throwaway, and not reachable from outside the developer's machine. **Never** reuse them in any real Jenkins instance. The harness uses the password (not an API token) as the Basic-auth secret because the apitoken-property plugin has no public API for injecting a known-plaintext token.
+The committed `.env` contains a fixed admin password that is safe only because the Jenkins server is local, throwaway, and not reachable from outside the developer's machine. **Never** reuse it in any real Jenkins instance. The harness uses the password (not an API token) as the Basic-auth secret because the apitoken-property plugin has no public API for injecting a known-plaintext token.
