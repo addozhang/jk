@@ -114,6 +114,16 @@ func NewAuthRejected(host string) *JKError {
 	}
 }
 
+// NewIdentityEndpointNotFound is returned when Jenkins does not expose the
+// core whoAmI endpoint at the resolved instance URL.
+func NewIdentityEndpointNotFound(host string) *JKError {
+	return &JKError{
+		Code:       "identity_endpoint_not_found",
+		Message:    fmt.Sprintf("Jenkins identity endpoint not found at %s.", host),
+		Suggestion: "Check the Jenkins URL and context path.",
+	}
+}
+
 // NewNotFound is returned for HTTP 404 against a pipeline URL.
 func NewNotFound(pipelineURL string) *JKError {
 	return &JKError{

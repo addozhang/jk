@@ -87,6 +87,12 @@ func (c *Client) GetPipelineInfo(ctx context.Context, ref *jenkinsurl.Ref) ([]by
 	return c.getJSON(ctx, ref.APIPath("api/json"), "")
 }
 
+// GetWhoAmI fetches Jenkins's authenticated-user endpoint for an instance.
+// baseURL must be the normalized scheme/host plus optional context path.
+func (c *Client) GetWhoAmI(ctx context.Context, baseURL string) ([]byte, error) {
+	return c.getJSON(ctx, strings.TrimRight(baseURL, "/")+"/whoAmI/api/json", "")
+}
+
 // GetPipelineParams fetches the property/parameter definitions for a
 // pipeline. The Jenkins REST API embeds parameters inside the
 // pipeline's `property` array, so we issue a tree-filtered request to

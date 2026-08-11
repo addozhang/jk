@@ -40,6 +40,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -94,9 +95,77 @@ func newAuthCommand(flags *GlobalFlags) *cobra.Command {
 	cmd.AddCommand(
 		newAuthAddCommand(flags),
 		newAuthListCommand(flags),
+		newAuthWhoAmICommand(flags),
 		newAuthRemoveCommand(flags),
 	)
 	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// jk auth whoami <url>
+// ---------------------------------------------------------------------------
+
+func newAuthWhoAmICommand(flags *GlobalFlags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "whoami <url>",
+		Short: "Show the authenticated Jenkins user",
+		Long: `Verify the credentials selected for <url> by querying Jenkins's
+whoAmI endpoint. The URL may be a Jenkins root URL or a job URL; context paths
+are preserved. Tokens are never printed.
+
+See docs/schema.md for the response shape.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAuthWhoAmI(cmd, flags, args[0])
+		},
+	}
+}
+
+func runAuthWhoAmI(cmd *cobra.Command, flags *GlobalFlags, rawURL string) error {
+	baseURL, err := normalizeWhoAmIURL(rawURL)
+	if err != nil {
+		return err
+	}
+	cc, err := newCommandContext(cmd, flags)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cc.withTimeout(cmd.Context())
+	defer cancel()
+	body, err := cc.client.GetWhoAmI(ctx, baseURL)
+	if err != nil {
+		return translateWhoAmIError(baseURL, flags.Timeout, err)
+	}
+	identity, err := schema.MapAuthWhoAmI(body)
+	if err != nil {
+		return jkerrors.NewMalformedResponse(baseURL, err)
+	}
+	return cc.render(identity)
+}
+
+func translateWhoAmIError(host string, timeout time.Duration, err error) error {
+	return translateError(host, timeout, err, func() error {
+		return jkerrors.NewIdentityEndpointNotFound(host)
+	})
+}
+
+func normalizeWhoAmIURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", &jkerrors.JKError{
+			Code:       "invalid_url",
+			Message:    fmt.Sprintf("Host %q is missing a scheme or hostname.", raw),
+			Suggestion: "Use a URL like https://jenkins.example.com",
+		}
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", &jkerrors.JKError{
+			Code:    "invalid_url",
+			Message: fmt.Sprintf("Unsupported scheme %q (expected http or https).", u.Scheme),
+		}
+	}
+	return u.Scheme + "://" + u.Host + extractBasePath(u.Path), nil
 }
 
 // ---------------------------------------------------------------------------

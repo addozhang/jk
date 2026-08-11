@@ -65,23 +65,20 @@ changelog:
     - title: "Other"
       order: 999
 
-brews:
+homebrew_casks:
   - name: jk
     ids:
+      - jk
+    binaries:
       - jk
     repository:
       owner: addozhang
       name: homebrew-tap
       # Uses HOMEBREW_TAP_GITHUB_TOKEN secret in the release workflow.
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: "https://github.com/addozhang/jk"
     description: "Pipeline-native Jenkins CLI"
-    license: "Apache-2.0"
-    install: |
-      bin.install "jk"
-    test: |
-      system "#{bin}/jk", "version"
 
 release:
   github:
