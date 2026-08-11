@@ -4,6 +4,7 @@ import (
 	"context"
 	stderrors "errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,16 @@ func Test_NewAuthRejected_MatchesSpecPhrasing(t *testing.T) {
 	}
 	if e.Code != "auth_rejected" {
 		t.Errorf("Code = %q, want auth_rejected", e.Code)
+	}
+}
+
+func Test_NewIdentityEndpointNotFound_DoesNotMentionPipeline(t *testing.T) {
+	e := jkerrors.NewIdentityEndpointNotFound("https://jenkins.example.com")
+	if e.Code != "identity_endpoint_not_found" {
+		t.Fatalf("Code = %q", e.Code)
+	}
+	if strings.Contains(e.Error(), "Pipeline") || !strings.Contains(e.Error(), "identity endpoint") {
+		t.Fatalf("Error = %q", e.Error())
 	}
 }
 

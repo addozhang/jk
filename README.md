@@ -44,6 +44,9 @@ Download `jk_<version>_<os>_<arch>.tar.gz` from the [Releases page](https://gith
 # 1. Add credentials for your Jenkins host
 jk auth add https://jenkins.example.com
 
+# Verify the authenticated Jenkins identity
+jk auth whoami https://jenkins.example.com
+
 # 2. Inspect a pipeline
 jk pipeline info https://jenkins.example.com/job/my-folder/job/my-pipeline
 
@@ -63,6 +66,9 @@ jk build cancel https://jenkins.example.com/job/deploy/42 --wait
 
 # 7. Inspect the parameter values a build was triggered with
 jk build params https://jenkins.example.com/job/my-pipeline/lastSuccessfulBuild
+
+# 8. Re-trigger a specific build with its recorded parameters
+jk build rebuild https://jenkins.example.com/job/my-pipeline/42
 ```
 
 ## AI agent skill
@@ -88,6 +94,24 @@ jk auth add https://jenkins.example.com
 ```
 
 Credentials are stored in `~/.config/jk/credentials` (mode `0600`, TOML format). Tokens are never printed by any `jk` command.
+
+Verify which Jenkins identity those credentials select without printing the token:
+
+```sh
+jk auth whoami https://jenkins.example.com
+```
+
+The command also accepts job URLs and preserves Jenkins context paths.
+
+### Rebuild a specific run
+
+`jk build rebuild <build-url>` reads the recorded parameters from the selected numeric or permalink build and triggers the same pipeline again:
+
+```sh
+jk build rebuild https://jenkins.example.com/job/deploy/42
+```
+
+Before triggering, `jk` verifies that every recorded parameter is still defined by the pipeline. Jenkins-redacted password or credential values cannot be recovered; use `jk build trigger -p KEY=VALUE` when explicit replacement values are required. Rebuild does not reproduce workspaces, environment variables, SCM revisions, or plugin-specific state.
 
 #### Context-path-scoped credentials
 
@@ -180,6 +204,18 @@ schema=$(jk pipeline info https://host/job/foo -o json | jq -r '.schemaVersion')
 Breaking changes will increment the version; additive changes (new fields, new enum values tagged `experimental`) will not. See [`docs/schema.md`](./docs/schema.md) for the full field reference and versioning policy.
 
 ## Release notes
+
+### v0.7.0 — auth identity and build rebuild
+
+**New features**
+
+- `jk auth whoami <url>` verifies the Jenkins identity selected by stored credentials without exposing the API token. Root URLs, job URLs, and context-path-mounted instances are supported.
+- `jk build rebuild <build-url>` re-triggers a specified numeric or permalink build with its recorded parameters, without requiring the Jenkins Rebuild plugin.
+
+**Safety and tooling improvements**
+
+- Rebuild validates recorded parameters against the pipeline's current definitions and refuses redacted, removed, or unsupported values before triggering.
+- Empty integration-test directories are skipped correctly, and the complete test, vet, and lint gates pass.
 
 ### v0.6.0 — build cancel
 

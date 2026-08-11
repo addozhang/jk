@@ -81,6 +81,17 @@ These commands print a human-readable confirmation to stderr and do not emit str
 
 The credential key is `scheme://host[:non-default-port]` plus an optional **context path** — the URL segments before the first `/job/` (a bare host or a pure `/job/...` URL yields no path; default ports `:80`/`:443` are dropped). Commands resolve a request URL to the most specific stored key that is a segment-boundary path-prefix of the URL, falling back to a host-only key when no context path matches. This lets several Jenkins instances on one host each carry a distinct credential while a plain host key still covers every path beneath it.
 
+### 3.2.1 `jk auth whoami <url>`
+
+Verifies the credentials selected for a Jenkins instance and returns the
+authenticated identity. API tokens are never included.
+
+| Field | Type | Tier | Description |
+|---|---|---|---|
+| `authenticated` | `boolean` | `experimental` | Whether Jenkins authenticated the request. |
+| `name` | `string` | `experimental` | Authenticated Jenkins username, or the server-reported anonymous name. |
+| `authorities` | `string[]` | `experimental` | Jenkins authorities granted to the user; empty when none are reported. |
+
 ### 3.3 `jk pipeline info <url>`
 
 Returns metadata about a single pipeline.
@@ -149,9 +160,14 @@ Item:
 
 Multibranch pipelines are reported as `FOLDER` (because their children are branch jobs); to fetch a specific branch, use that branch's URL with `jk pipeline info`.
 
-### 3.6 `jk build trigger <url>`
+### 3.6 `jk build trigger <url>` / `jk build rebuild <build-url>`
 
 Returns the queue + resolved build identifiers after a successful trigger.
+
+`rebuild` first reads the specified build's recorded parameter values and
+triggers the same pipeline with them. Parameters Jenkins redacts as `null`
+cannot be rebuilt automatically; use `jk build trigger` with explicit values
+instead.
 
 | Field | Type | Tier | Description |
 |---|---|---|---|

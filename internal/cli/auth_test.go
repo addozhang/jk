@@ -13,6 +13,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,84 @@ import (
 
 	"github.com/addozhang/jk/internal/auth"
 )
+
+func Test_AuthWhoAmI_RendersIdentityWithoutToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/whoAmI/api/json" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		user, token, ok := r.BasicAuth()
+		if !ok || user != "alice" || token != "secret" {
+			t.Fatalf("basic auth = %q/%q/%v", user, token, ok)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"authenticated":true,"name":"alice","authorities":["authenticated"]}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("HOME", t.TempDir())
+	store, err := auth.NewFileStore(credentialsPathForTest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(server.URL, auth.Credential{Username: "alice", Token: "secret"}); err != nil {
+		t.Fatal(err)
+	}
+
+	root := NewRootCommand()
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	root.SetArgs([]string{"auth", "whoami", server.URL})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("auth whoami: %v\nstderr: %s", err, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "name: alice") || strings.Contains(out.String(), "secret") {
+		t.Fatalf("unexpected output: %s", out.String())
+	}
+}
+
+func Test_AuthWhoAmI_AnonymousIdentityIsSuccessful(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"authenticated":false,"name":"anonymous","authorities":[]}`))
+	}))
+	defer server.Close()
+
+	stdout, _, err := runJK(t, []string{"auth", "whoami", server.URL})
+	if err != nil {
+		t.Fatalf("auth whoami: %v", err)
+	}
+	if !strings.Contains(stdout, "authenticated: false") || !strings.Contains(stdout, "name: anonymous") {
+		t.Fatalf("unexpected output: %s", stdout)
+	}
+}
+
+func Test_AuthWhoAmI_NotFoundUsesIdentityError(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	_, _, err := runJK(t, []string{"auth", "whoami", server.URL})
+	if err == nil {
+		t.Fatal("expected missing whoAmI endpoint error")
+	}
+	if strings.Contains(err.Error(), "Pipeline not found") || !strings.Contains(err.Error(), "identity endpoint") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func Test_AuthWhoAmI_JobURLPreservesContextPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jenkins/whoAmI/api/json" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"authenticated":true,"name":"alice","authorities":[]}`))
+	}))
+	defer server.Close()
+
+	if _, _, err := runJK(t, []string{"auth", "whoami", server.URL + "/jenkins/job/svc/7/"}); err != nil {
+		t.Fatalf("auth whoami: %v", err)
+	}
+}
 
 // withStubReadSecret installs a test-only readSecret that reads a single
 // newline-delimited line from the shared bufio.Reader. It is restored

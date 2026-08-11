@@ -44,10 +44,10 @@ test-unit: ## Run unit tests under internal/.
 
 .PHONY: test-integration
 test-integration: ## Run integration tests under test/integration (when present).
-	@if [ -d test/integration ]; then \
-		$(GO) test -race -count=1 ./test/integration/...; \
+	@if packages="$$( $(GO) list ./test/integration/... 2>/dev/null)" && [ -n "$$packages" ]; then \
+		$(GO) test -race -count=1 $$packages; \
 	else \
-		echo "no test/integration directory yet; skipping"; \
+		echo "no integration test packages yet; skipping"; \
 	fi
 
 .PHONY: test-e2e

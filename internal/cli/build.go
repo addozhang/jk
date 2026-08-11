@@ -1,6 +1,6 @@
 package cli
 
-// build.go wires the `jk build {trigger,status,stages,input,logs}`
+// build.go wires the `jk build {trigger,rebuild,status,stages,input,logs}`
 // subcommands. Each subcommand follows the same four-step pattern used
 // by pipeline.go (parse URL → client call → mapper → render); the
 // extra mechanics live in dedicated helpers:
@@ -51,6 +51,7 @@ func newBuildCommand(flags *GlobalFlags) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newBuildTriggerCommand(flags),
+		newBuildRebuildCommand(flags),
 		newBuildStatusCommand(flags),
 		newBuildParamsCommand(flags),
 		newBuildStagesCommand(flags),
@@ -59,6 +60,108 @@ func newBuildCommand(flags *GlobalFlags) *cobra.Command {
 		newBuildLogsCommand(flags),
 	)
 	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// jk build rebuild <build-url>
+// ---------------------------------------------------------------------------
+
+func newBuildRebuildCommand(flags *GlobalFlags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "rebuild <build-url>",
+		Short: "Re-trigger a build with its original parameters",
+		Long: `Fetch the trigger-time parameters from <build-url> and trigger the
+same pipeline again with those values. Jenkins-redacted password and
+credentials parameters cannot be rebuilt because their values are unavailable.
+
+See docs/schema.md §3.6 for the response shape.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBuildRebuild(cmd, flags, args[0])
+		},
+	}
+}
+
+func runBuildRebuild(cmd *cobra.Command, flags *GlobalFlags, rawURL string) error {
+	buildRef, err := resolveBuildRef(rawURL)
+	if err != nil {
+		return err
+	}
+	cc, err := newCommandContext(cmd, flags)
+	if err != nil {
+		return err
+	}
+
+	paramsCtx, cancelParams := cc.withTimeout(cmd.Context())
+	body, err := cc.client.GetBuildParams(paramsCtx, buildRef)
+	cancelParams()
+	if err != nil {
+		return translateBuildClientError(buildRef.Host, rawURL, flags.Timeout, err)
+	}
+	buildParams, err := schema.MapBuildParams(body)
+	if err != nil {
+		return jkerrors.NewMalformedResponse(buildRef.Host, err)
+	}
+	params, err := rebuildParams(buildParams)
+	if err != nil {
+		return err
+	}
+
+	pipelineRef := *buildRef
+	pipelineRef.BuildNumber = 0
+	pipelineRef.BuildPermalink = ""
+	if len(params) > 0 {
+		if validationErr := validateParamNames(cmd.Context(), cc, &pipelineRef, pipelineRef.APIPath(""), flags.Timeout, params); validationErr != nil {
+			return validationErr
+		}
+	}
+	triggerCtx, cancelTrigger := cc.withTimeout(cmd.Context())
+	queueLoc, err := cc.client.TriggerBuild(triggerCtx, &pipelineRef, params)
+	cancelTrigger()
+	if err != nil {
+		return translateBuildClientError(buildRef.Host, rawURL, flags.Timeout, err)
+	}
+	queueID, err := extractQueueID(queueLoc)
+	if err != nil {
+		return jkerrors.NewMalformedResponse(buildRef.Host, err)
+	}
+	queueTimeout := flags.Timeout * 10
+	if max := 5 * time.Minute; queueTimeout > max {
+		queueTimeout = max
+	}
+	buildURL, buildNumber, err := cc.client.ResolveQueueItem(cmd.Context(), queueLoc, queueTimeout)
+	if err != nil {
+		return translateBuildClientError(buildRef.Host, rawURL, queueTimeout, err)
+	}
+	return cc.render(schema.BuildTrigger{QueueID: queueID, BuildURL: &buildURL, BuildNumber: &buildNumber})
+}
+
+func rebuildParams(params *schema.BuildParams) (map[string]string, error) {
+	out := make(map[string]string, len(params.Parameters))
+	for _, param := range params.Parameters {
+		if param.Value == nil {
+			return nil, &jkerrors.JKError{
+				Code:       "rebuild_parameter_unavailable",
+				Message:    fmt.Sprintf("Cannot rebuild because parameter %q has no value.", param.Name),
+				Suggestion: "Trigger the pipeline again with an explicit -p value.",
+			}
+		}
+		switch value := param.Value.(type) {
+		case string:
+			out[param.Name] = value
+		case bool:
+			out[param.Name] = strconv.FormatBool(value)
+		case float64:
+			out[param.Name] = strconv.FormatFloat(value, 'f', -1, 64)
+		default:
+			return nil, &jkerrors.JKError{
+				Code:       "rebuild_parameter_invalid",
+				Message:    fmt.Sprintf("Cannot rebuild parameter %q because Jenkins returned an unsupported value.", param.Name),
+				Suggestion: "Trigger the pipeline again with an explicit -p value.",
+			}
+		}
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,8 +1383,8 @@ var _ buildClientSurface = (*jenkins.Client)(nil)
 type buildClientSurface interface {
 	TriggerBuild(ctx context.Context, ref *jenkinsurl.Ref, params map[string]string) (string, error)
 	ResolveQueueItem(ctx context.Context, queueURL string, timeout time.Duration) (string, int, error)
-	GetBuildStatus(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetBuildParams(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
+	GetBuildStatus(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetBuildStages(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetPendingInputs(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	SubmitInput(ctx context.Context, ref *jenkinsurl.Ref, inputID string, proceed bool, proceedText, proceedURL string, parameters []jenkins.InputParameterValue) error

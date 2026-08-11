@@ -71,6 +71,119 @@ func (m *muxBuilder) server() *httptest.Server {
 // 14.1 build trigger
 // ---------------------------------------------------------------------------
 
+func Test_BuildRebuild_ReusesBuildParameters(t *testing.T) {
+	var gotBranch string
+	srv := newMux(t).
+		handle("/job/svc/7/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":7,"url":"http://example/job/svc/7/","actions":[{"_class":"hudson.model.ParametersAction","parameters":[{"name":"BRANCH","value":"main"}]}]}`)
+		}).
+		handle("/job/svc/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"property":[{"_class":"hudson.model.ParametersDefinitionProperty","parameterDefinitions":[{"name":"BRANCH"}]}]}`)
+		}).
+		handle("/job/svc/buildWithParameters", func(w http.ResponseWriter, r *http.Request) {
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse form: %v", err)
+			}
+			gotBranch = r.Form.Get("BRANCH")
+			w.Header().Set("Location", "http://"+r.Host+"/queue/item/88/")
+			w.WriteHeader(http.StatusCreated)
+		}).
+		handle("/queue/item/88/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"executable":{"number":8,"url":"http://example/job/svc/8/"}}`)
+		}).
+		server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "rebuild", srv.URL + "/job/svc/7/"})
+	if err != nil {
+		t.Fatalf("build rebuild: %v", err)
+	}
+	if gotBranch != "main" || !strings.Contains(stdout, "queueId: 88") || !strings.Contains(stdout, "buildNumber: 8") {
+		t.Fatalf("branch=%q output=%s", gotBranch, stdout)
+	}
+}
+
+func Test_BuildRebuild_UnparameterizedUsesBuildEndpoint(t *testing.T) {
+	var triggered bool
+	srv := newMux(t).
+		handle("/job/svc/7/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":7,"url":"http://example/job/svc/7/","actions":[]}`)
+		}).
+		handle("/job/svc/build", func(w http.ResponseWriter, r *http.Request) {
+			triggered = true
+			w.Header().Set("Location", "http://"+r.Host+"/queue/item/89/")
+			w.WriteHeader(http.StatusCreated)
+		}).
+		handle("/queue/item/89/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"executable":{"number":8,"url":"http://example/job/svc/8/"}}`)
+		}).
+		server()
+	defer srv.Close()
+
+	if _, _, err := runJK(t, []string{"build", "rebuild", srv.URL + "/job/svc/7/"}); err != nil {
+		t.Fatalf("build rebuild: %v", err)
+	}
+	if !triggered {
+		t.Fatal("unparameterized build was not triggered")
+	}
+}
+
+func Test_BuildRebuild_RejectsRemovedParameterBeforeTrigger(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/7/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":7,"url":"http://example/job/svc/7/","actions":[{"_class":"hudson.model.ParametersAction","parameters":[{"name":"REMOVED","value":"x"}]}]}`)
+		}).
+		handle("/job/svc/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"property":[]}`)
+		}).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "rebuild", srv.URL + "/job/svc/7/"})
+	if err == nil || !strings.Contains(err.Error(), "REMOVED") {
+		t.Fatalf("expected removed parameter error, got %v", err)
+	}
+}
+
+func Test_BuildRebuild_RejectsRedactedParameterBeforeTrigger(t *testing.T) {
+	srv := newMux(t).
+		handle("/job/svc/7/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":7,"url":"http://example/job/svc/7/","actions":[{"_class":"hudson.model.ParametersAction","parameters":[{"name":"TOKEN","value":null}]}]}`)
+		}).
+		server()
+	defer srv.Close()
+
+	_, _, err := runJK(t, []string{"build", "rebuild", srv.URL + "/job/svc/7/"})
+	if err == nil || !strings.Contains(err.Error(), "TOKEN") {
+		t.Fatalf("expected redacted parameter error, got %v", err)
+	}
+}
+
+func Test_BuildRebuild_PermalinkPreservesContextPath(t *testing.T) {
+	var triggered bool
+	srv := newMux(t).
+		handle("/jenkins/job/svc/lastSuccessfulBuild/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":7,"url":"http://example/jenkins/job/svc/7/","actions":[]}`)
+		}).
+		handle("/jenkins/job/svc/build", func(w http.ResponseWriter, r *http.Request) {
+			triggered = true
+			w.Header().Set("Location", "http://"+r.Host+"/queue/item/90/")
+			w.WriteHeader(http.StatusCreated)
+		}).
+		handle("/queue/item/90/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"executable":{"number":8,"url":"http://example/jenkins/job/svc/8/"}}`)
+		}).
+		server()
+	defer srv.Close()
+
+	if _, _, err := runJK(t, []string{"build", "rebuild", srv.URL + "/jenkins/job/svc/lastSuccessfulBuild/"}); err != nil {
+		t.Fatalf("build rebuild: %v", err)
+	}
+	if !triggered {
+		t.Fatal("context-path pipeline was not triggered")
+	}
+}
+
 // Scenario: "Trigger an unparameterized build" — POST /build, queue
 // resolves, response carries queueId/buildUrl/buildNumber.
 func Test_BuildTrigger_Unparameterized(t *testing.T) {

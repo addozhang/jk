@@ -678,6 +678,7 @@ func certToPEM(t *testing.T, cert *x509.Certificate) []byte {
 	t.Helper()
 	if cert == nil {
 		t.Fatal("nil cert")
+		return nil
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 }

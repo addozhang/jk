@@ -118,6 +118,13 @@ type AuthList struct {
 	Hosts []string `json:"hosts"`
 }
 
+// AuthWhoAmI is the response of `jk auth whoami`. Stability: experimental.
+type AuthWhoAmI struct {
+	Authenticated bool     `json:"authenticated"`
+	Name          string   `json:"name"`
+	Authorities   []string `json:"authorities"`
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline info (docs/schema.md §3.3)
 // ---------------------------------------------------------------------------
