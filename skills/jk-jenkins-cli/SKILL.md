@@ -15,7 +15,7 @@ Use `jk` to inspect and operate Jenkins Pipelines from the terminal.
 - Credentials are selected by normalized Jenkins host.
 - Output is stable and self-owned. Prefer `-o json` for agent parsing, YAML for humans, and `-o raw` only when a command is explicitly raw/log-oriented.
 - The tool is Pipeline-focused. Do not expect plugin, agent, credential-store, Freestyle, or Jenkinsfile-editing administration commands.
-- It can inspect pipelines, trigger builds, watch builds, read logs, inspect stages, inspect submitted parameters, and respond to pending Pipeline `input` steps.
+- It can verify the authenticated Jenkins identity, inspect pipelines, trigger or rebuild builds, watch builds, read logs, inspect stages, inspect submitted parameters, and respond to pending Pipeline `input` steps.
 
 ## First Move
 
@@ -32,10 +32,12 @@ When Jenkins work is requested:
 ```sh
 jk auth add <jenkins-url-or-host>
 jk auth list -o json
+jk auth whoami <jenkins-url-or-job-url> -o json
 jk pipeline info <pipeline-url> -o json
 jk pipeline params <pipeline-url> -o json
 jk pipeline list <folder-url> -o json
 jk build trigger <pipeline-url> [-p KEY=VALUE ...] [--watch]
+jk build rebuild <build-url>
 jk build status <build-url> -o json
 jk build params <build-url> -o json
 jk build stages <build-url> -o json
@@ -112,6 +114,23 @@ When `--watch` is used, interpret exit codes as build results:
 
 Do not treat a non-zero `--watch` exit as a generic CLI failure. Exit codes `1` through `4` are Jenkins build states and should guide follow-up inspection.
 
+### Rebuild a Specific Build
+
+Use `jk build rebuild` only when the user explicitly wants to re-trigger a specific historical build. It reads that build's recorded parameters, validates that they are still defined, and triggers the same pipeline without depending on the Jenkins Rebuild plugin.
+
+```sh
+jk build params https://jenkins.example.com/job/app/42 -o json
+jk build rebuild https://jenkins.example.com/job/app/42
+```
+
+Safety rules:
+
+- Treat rebuild as state-changing. Do not run it when the user only asks to inspect, diagnose, or explain a failure.
+- Use the exact numeric or permalink build URL the user selected; do not silently substitute `lastBuild` when the requested source build is ambiguous.
+- For production, release, deployment, or destructive pipelines, confirm before rebuilding unless the user explicitly requested that exact rebuild.
+- If Jenkins redacted a password or credential parameter, or a recorded parameter no longer exists, do not guess or omit it. Explain the error and use `jk build trigger -p KEY=VALUE` only after the user supplies or authorizes explicit replacement values.
+- Rebuild reproduces recorded parameters only. It does not reproduce workspaces, environment variables, SCM revisions, causes, or plugin-specific state.
+
 ### Handle a Pending Input Step
 
 For any pending input request, inspect the gate before asking for approval or changing state. If the user asks to approve a pending input but has not explicitly authorized `proceed`, answer with the read-only inspection command first, then ask for confirmation.
@@ -165,6 +184,8 @@ If `pipeline list` says the URL is a pipeline rather than a folder, switch to `p
 
 Use `jk auth add <host-or-url>` for first-time setup. It stores credentials under `~/.config/jk/credentials` with file mode `0600` and never prints tokens.
 
+Use `jk auth whoami <url> -o json` to verify which Jenkins identity the selected credentials authenticate as. The URL may be a Jenkins root URL or job URL; context paths are preserved. An `authenticated: false` response is a successful anonymous identity response, not a token leak or parser failure.
+
 Security rules:
 
 - Do not ask the user to paste Jenkins tokens into chat if an interactive terminal path is available.
@@ -195,6 +216,8 @@ Read-only inspection is safe by default:
 jk pipeline info ...
 jk pipeline params ...
 jk pipeline list ...
+jk auth list ...
+jk auth whoami ...
 jk build status ...
 jk build params ...
 jk build stages ...
@@ -205,6 +228,7 @@ State-changing commands need clear user intent:
 
 ```sh
 jk build trigger ...
+jk build rebuild ...
 jk build input ... proceed|abort
 jk build cancel ...
 jk auth add ... --force
@@ -227,7 +251,9 @@ Common cases:
 
 - Bad URL or missing build number: use a full Jenkins URL and append a build number or permalink for build inspection.
 - Auth failure: run `jk auth list -o json` to see configured hosts, then `jk auth add <host>` if needed.
+- Unclear authenticated identity: run `jk auth whoami <url> -o json`; never inspect or print the credentials file.
 - Unknown parameter: run `jk pipeline params <pipeline-url> -o json` and retry with valid names.
+- Rebuild parameter unavailable or removed: do not retry by dropping it; inspect `jk build params <build-url> -o json` and require explicit replacement values through `jk build trigger`.
 - TLS failure: prefer `SSL_CERT_FILE`; avoid `--insecure` unless explicitly acceptable.
 - `PENDING_INPUT`: inspect `pendingInput`; use `--input-id` when ambiguous; do not auto-proceed without user intent.
 

@@ -72,6 +72,18 @@
       "prompt": "The user asks: 'Can jk lint and rewrite this Jenkinsfile for me?' What should the agent answer?",
       "expected_output": "The agent should explain that jk is not a Jenkinsfile linter or editor. It can be used later to inspect or run Jenkins Pipeline builds, but code editing/linting should use repository tooling or Jenkins-specific linters if available.",
       "files": []
+    },
+    {
+      "id": 13,
+      "prompt": "A user asks which Jenkins account jk is using for https://jenkins.example.com/jenkins/job/deploy, but says not to expose any secrets. What exact command and interpretation should the agent provide?",
+      "expected_output": "The agent should use jk auth whoami <url> -o json, explain that job URLs and context paths are supported, report authenticated/name/authorities without reading credential files or printing tokens, and treat authenticated:false as a valid anonymous identity response.",
+      "files": []
+    },
+    {
+      "id": 14,
+      "prompt": "The user explicitly asks to rerun https://jenkins.example.com/job/deploy/42 with exactly the parameters recorded on build 42. Explain the safe jk workflow, including what to do if a credential parameter was redacted or removed from the pipeline.",
+      "expected_output": "The agent should identify jk build rebuild <build-url> as the command, optionally inspect jk build params first, recognize rebuild as state-changing, avoid substituting another build, and refuse to guess or omit redacted/removed parameters; explicit replacements require jk build trigger -p after user authorization.",
+      "files": []
     }
   ]
 }
