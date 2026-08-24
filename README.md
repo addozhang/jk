@@ -205,6 +205,20 @@ Breaking changes will increment the version; additive changes (new fields, new e
 
 ## Release notes
 
+### v0.8.0 — archived artifact downloads
+
+**New features**
+
+- `jk build artifacts <build-url>` lists files archived by a Jenkins build in stable YAML or JSON output.
+- `jk build artifact <build-url> <relative-path> --destination <file>` downloads one artifact with exact metadata membership validation.
+- `jk build artifacts fetch <build-url> --directory <dir>` downloads all artifacts sequentially while preserving their archived paths.
+
+**Safety and tooling improvements**
+
+- Artifact content streams to disk through same-directory temporary files and is installed only after a complete download.
+- Bulk downloads reject traversal, absolute paths, and symlinked parent paths; existing files require explicit `--force`.
+- Artifact downloads follow external Artifact Manager redirects without forwarding Jenkins credentials to unrelated hosts.
+
 ### v0.7.0 — auth identity and build rebuild
 
 **New features**
