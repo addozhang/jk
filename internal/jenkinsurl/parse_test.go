@@ -231,6 +231,35 @@ func Test_Parse_ContextPath(t *testing.T) {
 	}
 }
 
+func Test_Ref_ArtifactPath_EncodesEachSegment(t *testing.T) {
+	tests := []struct {
+		name         string
+		ref          Ref
+		relativePath string
+		want         string
+	}{
+		{
+			name:         "numeric nested path",
+			ref:          Ref{Host: "https://jenkins.example", JobSegments: []string{"svc"}, BuildNumber: 42},
+			relativePath: "reports/unit report/index#1.html",
+			want:         "https://jenkins.example/job/svc/42/artifact/reports/unit%20report/index%231.html",
+		},
+		{
+			name:         "permalink and reserved characters",
+			ref:          Ref{Host: "https://jenkins.example", BasePath: "/ci", JobSegments: []string{"my job"}, BuildPermalink: "lastSuccessfulBuild"},
+			relativePath: "dist/app+linux?.zip",
+			want:         "https://jenkins.example/ci/job/my%20job/lastSuccessfulBuild/artifact/dist/app+linux%3F.zip",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ref.ArtifactPath(tt.relativePath); got != tt.want {
+				t.Fatalf("ArtifactPath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // Test_Parse_ContextPath_Rejections asserts that adding a context-path prefix
 // does not loosen the two core rejections: a path with no /job/ token at all,
 // and an empty job segment after the prefix.

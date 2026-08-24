@@ -318,6 +318,19 @@ type BuildParameter struct {
 	Value any `json:"value"`
 }
 
+// BuildArtifacts is the response of `jk build artifacts`. Stability: stable.
+type BuildArtifacts struct {
+	BuildURL    string     `json:"buildUrl"`
+	BuildNumber int        `json:"buildNumber"`
+	Artifacts   []Artifact `json:"artifacts"`
+}
+
+// Artifact identifies one file archived by a Jenkins build.
+type Artifact struct {
+	FileName     string `json:"fileName"`
+	RelativePath string `json:"relativePath"`
+}
+
 // ---------------------------------------------------------------------------
 // Build stages (docs/schema.md §3.8)
 // ---------------------------------------------------------------------------

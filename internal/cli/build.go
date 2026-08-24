@@ -54,6 +54,8 @@ func newBuildCommand(flags *GlobalFlags) *cobra.Command {
 		newBuildRebuildCommand(flags),
 		newBuildStatusCommand(flags),
 		newBuildParamsCommand(flags),
+		newBuildArtifactsCommand(flags),
+		newBuildArtifactCommand(flags),
 		newBuildStagesCommand(flags),
 		newBuildInputCommand(flags),
 		newBuildCancelCommand(flags),
@@ -1384,6 +1386,8 @@ type buildClientSurface interface {
 	TriggerBuild(ctx context.Context, ref *jenkinsurl.Ref, params map[string]string) (string, error)
 	ResolveQueueItem(ctx context.Context, queueURL string, timeout time.Duration) (string, int, error)
 	GetBuildParams(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
+	GetBuildArtifacts(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
+	StreamArtifact(ctx context.Context, ref *jenkinsurl.Ref, relativePath string, w io.Writer) error
 	GetBuildStatus(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetBuildStages(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)
 	GetPendingInputs(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error)

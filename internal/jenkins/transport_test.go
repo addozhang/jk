@@ -19,6 +19,7 @@ import (
 	"github.com/addozhang/jk/internal/auth"
 	jkerrors "github.com/addozhang/jk/internal/errors"
 	"github.com/addozhang/jk/internal/jenkins"
+	"github.com/addozhang/jk/internal/jenkinsurl"
 )
 
 // ---------------------------------------------------------------------------
@@ -509,6 +510,30 @@ func Test_Debug_LogsRequestAndResponse_ToStderr(t *testing.T) {
 	}
 	if !strings.Contains(log, "ok") {
 		t.Errorf("debug log missing response body: %q", log)
+	}
+}
+
+func Test_Debug_ArtifactStreamingOmitsResponseBody(t *testing.T) {
+	const secretBody = "artifact-body-must-not-be-logged"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, secretBody)
+	}))
+	t.Cleanup(srv.Close)
+	var stderr strings.Builder
+	httpClient, err := jenkins.New(jenkins.Options{Debug: true, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := jenkinsurl.Parse(srv.URL + "/job/svc/42/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jenkins.NewClient(httpClient).StreamArtifact(context.Background(), ref, "app.bin", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	log := stderr.String()
+	if !strings.Contains(log, "200 OK") || strings.Contains(log, secretBody) {
+		t.Fatalf("unexpected debug log: %q", log)
 	}
 }
 

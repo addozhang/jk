@@ -28,6 +28,7 @@ package jenkins
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -297,6 +298,12 @@ type debugLogger struct {
 	w    io.Writer
 }
 
+type streamingResponseContextKey struct{}
+
+func markStreamingResponse(ctx context.Context) context.Context {
+	return context.WithValue(ctx, streamingResponseContextKey{}, true)
+}
+
 const redactedPlaceholder = "REDACTED"
 
 func (d *debugLogger) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -326,7 +333,8 @@ func (d *debugLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 		d.logf("--- jk response (error) ---\n%v\n", err)
 		return nil, err
 	}
-	if dump, derr := httputil.DumpResponse(resp, true); derr == nil {
+	includeBody := req.Context().Value(streamingResponseContextKey{}) != true
+	if dump, derr := httputil.DumpResponse(resp, includeBody); derr == nil {
 		d.logf("--- jk response ---\n%s\n", dump)
 	} else {
 		d.logf("--- jk response (dump failed: %v) ---\n", derr)

@@ -121,6 +121,17 @@ func (r *Ref) APIPath(suffix string) string {
 	return b.String()
 }
 
+// ArtifactPath returns the content URL for one archived artifact. Each
+// relative-path segment is escaped independently so nested directories remain
+// path separators while reserved characters cannot alter the URL structure.
+func (r *Ref) ArtifactPath(relativePath string) string {
+	segments := strings.Split(relativePath, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return r.APIPath("artifact/" + strings.Join(segments, "/"))
+}
+
 // Parse converts a Jenkins job URL into a Ref. See the package documentation
 // and openspec/changes/init-jk-jenkins-cli/specs/url-resolution/spec.md for
 // the full set of accepted shapes and rejected inputs.

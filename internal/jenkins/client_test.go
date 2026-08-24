@@ -18,17 +18,117 @@ package jenkins_test
 // the job of group 12.
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/addozhang/jk/internal/auth"
 	"github.com/addozhang/jk/internal/jenkins"
 	"github.com/addozhang/jk/internal/jenkinsurl"
 )
+
+func Test_Client_GetBuildArtifacts(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+	rec.handle("/job/svc/lastSuccessfulBuild/api/json", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("tree"); got != "number,url,artifacts[fileName,relativePath]" {
+			t.Errorf("tree = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"number":42,"url":"https://jenkins.example/job/svc/42/","artifacts":[]}`)
+	})
+	ref := mustParseRef(t, srv.URL+"/job/svc/lastSuccessfulBuild/")
+	if _, err := client.GetBuildArtifacts(context.Background(), ref); err != nil {
+		t.Fatalf("GetBuildArtifacts: %v", err)
+	}
+}
+
+func Test_Client_StreamArtifact(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+	want := bytes.Repeat([]byte{0, 1, 2, 3}, (16<<20)/4+1)
+	rec.handle("/job/svc/42/artifact/dist/app.bin", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(want)
+	})
+	ref := mustParseRef(t, srv.URL+"/job/svc/42/")
+	var got bytes.Buffer
+	if err := client.StreamArtifact(context.Background(), ref, "dist/app.bin", &got); err != nil {
+		t.Fatalf("StreamArtifact: %v", err)
+	}
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatalf("downloaded %d bytes, want %d", got.Len(), len(want))
+	}
+}
+
+func Test_Client_StreamArtifact_HTTPError(t *testing.T) {
+	client, rec, srv := newClientAgainst(t)
+	rec.handle("/job/svc/42/artifact/missing.txt", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gone", http.StatusNotFound)
+	})
+	ref := mustParseRef(t, srv.URL+"/job/svc/42/")
+	err := client.StreamArtifact(context.Background(), ref, "missing.txt", io.Discard)
+	var statusErr *jenkins.HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("error = %v, want HTTPStatusError 404", err)
+	}
+}
+
+func Test_Client_StreamArtifact_FollowsRedirectWithoutForwardingAuth(t *testing.T) {
+	var redirectedAuth string
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, "stored")
+	}))
+	defer storage.Close()
+	var jenkinsAuth string
+	jenkinsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jenkinsAuth = r.Header.Get("Authorization")
+		http.Redirect(w, r, storage.URL+"/object", http.StatusFound)
+	}))
+	defer jenkinsServer.Close()
+
+	store, err := auth.NewFileStore(filepath.Join(t.TempDir(), "credentials"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(jenkinsServer.URL, auth.Credential{Username: "alice", Token: "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	httpClient, err := jenkins.New(jenkins.Options{Credentials: store, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := jenkins.NewClient(httpClient)
+	ref := mustParseRef(t, jenkinsServer.URL+"/job/svc/42/")
+	var got strings.Builder
+	if err := client.StreamArtifact(context.Background(), ref, "app.txt", &got); err != nil {
+		t.Fatal(err)
+	}
+	if jenkinsAuth == "" {
+		t.Fatal("production auth injector did not authenticate the Jenkins request")
+	}
+	if got.String() != "stored" || redirectedAuth != "" {
+		t.Fatalf("content=%q redirected auth=%q", got.String(), redirectedAuth)
+	}
+}
+
+func Test_Client_StreamArtifact_Cancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	client := jenkins.NewClient(srv.Client())
+	ref := mustParseRef(t, srv.URL+"/job/svc/42/")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := client.StreamArtifact(ctx, ref, "app.txt", io.Discard); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+}
 
 // recordedRequest captures everything we want to assert about a single
 // request the client made to the fake server.

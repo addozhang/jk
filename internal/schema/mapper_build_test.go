@@ -842,6 +842,30 @@ func Test_MapBuildParams_MultipleActionsLastWriteWins(t *testing.T) {
 	}
 }
 
+func Test_MapBuildArtifacts(t *testing.T) {
+	raw := []byte(`{"number":42,"url":"https://jenkins/job/svc/42/","artifacts":[{"fileName":"app.zip","relativePath":"dist/app.zip"},{"fileName":"index.html","relativePath":"reports/index.html"}]}`)
+	got, err := schema.MapBuildArtifacts(raw)
+	if err != nil {
+		t.Fatalf("MapBuildArtifacts: %v", err)
+	}
+	if got.BuildNumber != 42 || got.BuildURL != "https://jenkins/job/svc/42/" {
+		t.Fatalf("identity = %+v", got)
+	}
+	if len(got.Artifacts) != 2 || got.Artifacts[0].RelativePath != "dist/app.zip" || got.Artifacts[1].FileName != "index.html" {
+		t.Fatalf("artifacts = %+v", got.Artifacts)
+	}
+}
+
+func Test_MapBuildArtifacts_EmptyArray(t *testing.T) {
+	got, err := schema.MapBuildArtifacts([]byte(`{"number":1,"url":"https://jenkins/job/svc/1/"}`))
+	if err != nil {
+		t.Fatalf("MapBuildArtifacts: %v", err)
+	}
+	if got.Artifacts == nil || len(got.Artifacts) != 0 {
+		t.Fatalf("artifacts = %#v, want non-nil empty slice", got.Artifacts)
+	}
+}
+
 // MapBuildCancel projects a running build's status onto BuildCancel.
 // State reflects the build state at the moment cancel was requested,
 // so a still-running build yields RUNNING.

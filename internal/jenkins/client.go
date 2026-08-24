@@ -150,6 +150,16 @@ func (c *Client) GetBuildParams(ctx context.Context, ref *jenkinsurl.Ref) ([]byt
 	return c.getJSON(ctx, ref.APIPath("api/json"), tree)
 }
 
+// GetBuildArtifacts fetches the resolved build identity and archived artifact
+// metadata for a numeric build or Jenkins permalink.
+func (c *Client) GetBuildArtifacts(ctx context.Context, ref *jenkinsurl.Ref) ([]byte, error) {
+	if ref.BuildNumber == 0 && ref.BuildPermalink == "" {
+		return nil, errors.New("jenkins: GetBuildArtifacts requires a Ref with a non-zero BuildNumber or a BuildPermalink")
+	}
+	const tree = "number,url,artifacts[fileName,relativePath]"
+	return c.getJSON(ctx, ref.APIPath("api/json"), tree)
+}
+
 // ResolveLastBuild returns the build number of the pipeline's most
 // recent build, regardless of result. Returns an error if the pipeline
 // has never been built (lastBuild is null in the API response).
@@ -575,6 +585,35 @@ func (c *Client) StreamConsoleLog(ctx context.Context, ref *jenkinsurl.Ref, w io
 			// continue polling
 		}
 	}
+}
+
+// StreamArtifact writes one archived artifact directly to w without buffering
+// the response body or applying the JSON response-size limit.
+func (c *Client) StreamArtifact(ctx context.Context, ref *jenkinsurl.Ref, relativePath string, w io.Writer) error {
+	if ref.BuildNumber == 0 && ref.BuildPermalink == "" {
+		return errors.New("jenkins: StreamArtifact requires a Ref with a non-zero BuildNumber or a BuildPermalink")
+	}
+	if relativePath == "" {
+		return errors.New("jenkins: StreamArtifact requires a non-empty relativePath")
+	}
+	endpoint := ref.ArtifactPath(relativePath)
+	req, err := http.NewRequestWithContext(markStreamingResponse(ctx), http.MethodGet, endpoint, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("jenkins: StreamArtifact: build request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer closeBody(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10)) //nolint:errcheck // best-effort error context
+		return &HTTPStatusError{URL: endpoint, StatusCode: resp.StatusCode, Status: resp.Status, Body: body}
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return fmt.Errorf("jenkins: StreamArtifact: write: %w", err)
+	}
+	return nil
 }
 
 // streamLogChunk performs a single GET /logText/progressiveText request

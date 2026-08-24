@@ -423,3 +423,21 @@ func MapBuildParams(raw []byte) (*BuildParams, error) {
 	}
 	return out, nil
 }
+
+// MapBuildArtifacts converts Jenkins's filtered build response into stable
+// artifact metadata while preserving server order and a non-nil empty array.
+func MapBuildArtifacts(raw []byte) (*BuildArtifacts, error) {
+	var src struct {
+		Number    int        `json:"number"`
+		URL       string     `json:"url"`
+		Artifacts []Artifact `json:"artifacts"`
+	}
+	if err := json.Unmarshal(raw, &src); err != nil {
+		return nil, fmt.Errorf("MapBuildArtifacts: %w", err)
+	}
+	artifacts := src.Artifacts
+	if artifacts == nil {
+		artifacts = []Artifact{}
+	}
+	return &BuildArtifacts{BuildURL: src.URL, BuildNumber: src.Number, Artifacts: artifacts}, nil
+}
