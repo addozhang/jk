@@ -95,7 +95,8 @@ func Test_Client_StreamArtifact_FollowsRedirectWithoutForwardingAuth(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add(jenkinsServer.URL, auth.Credential{Username: "alice", Token: "secret"}); err != nil {
+	err = store.Add(jenkinsServer.URL, auth.Credential{Username: "alice", Token: "secret"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	httpClient, err := jenkins.New(jenkins.Options{Credentials: store, Stderr: io.Discard})
