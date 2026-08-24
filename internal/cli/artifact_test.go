@@ -113,15 +113,20 @@ func TestDownloadArtifactFile(t *testing.T) {
 	})
 
 	t.Run("rejects destination changed to another regular file during download", func(t *testing.T) {
-		destination := filepath.Join(t.TempDir(), "app.bin")
+		dir := t.TempDir()
+		destination := filepath.Join(dir, "app.bin")
+		replacement := filepath.Join(dir, "replacement.bin")
 		if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		streamer := artifactStreamerFunc(func(_ context.Context, _ *jenkinsurl.Ref, _ string, w io.Writer) error {
 			if err := os.Remove(destination); err != nil {
 				return err
 			}
-			if err := os.WriteFile(destination, []byte("replacement"), 0o600); err != nil {
+			if err := os.Rename(replacement, destination); err != nil {
 				return err
 			}
 			_, err := w.Write([]byte("new"))
