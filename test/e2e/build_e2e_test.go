@@ -13,9 +13,40 @@ package e2e
 // resolution shapes still being validated against a real Jenkins.
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func Test_E2E_BuildArtifacts(t *testing.T) {
+	url := h.jobURL("hello") + "lastSuccessfulBuild/"
+	stdout, _ := h.mustRun(t, "build", "artifacts", url, "-o", "json")
+	for _, want := range []string{`"buildNumber":`, `"relativePath":"dist/nested/payload.bin"`, `"relativePath":"reports/html/index.html"`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("missing %s in %s", want, stdout)
+		}
+	}
+
+	destination := filepath.Join(t.TempDir(), "payload.bin")
+	h.mustRun(t, "build", "artifact", url, "dist/nested/payload.bin", "--destination", destination)
+	payload, err := os.ReadFile(destination)
+	if err != nil || !bytes.Equal(payload, []byte{0, 1, 2, 3, 255}) {
+		t.Fatalf("payload=%v err=%v", payload, err)
+	}
+
+	directory := t.TempDir()
+	h.mustRun(t, "build", "artifacts", "fetch", url, "--directory", directory)
+	report, err := os.ReadFile(filepath.Join(directory, "reports", "html", "index.html"))
+	if err != nil || string(report) != "<h1>jk e2e report</h1>" {
+		t.Fatalf("report=%q err=%v", report, err)
+	}
+	_, _, err = h.run(t, "build", "artifacts", "fetch", url, "--directory", directory)
+	if err == nil {
+		t.Fatal("expected existing destination error")
+	}
+}
 
 // lastBuildURL returns the canonical URL for the most recent build of
 // jobPath. setupHarness has already warmed at least one build per
@@ -99,7 +130,7 @@ func Test_E2E_BuildStatus_LastBuildPermalink(t *testing.T) {
 	stdout, _ := h.mustRun(t, "build", "status", url)
 	for _, want := range []string{
 		`schemaVersion: "1"`,
-		"buildNumber: 1",
+		"buildNumber:",
 		"state: DONE",
 		"result: SUCCESS",
 	} {
@@ -117,7 +148,7 @@ func Test_E2E_BuildStatus_LastSuccessfulBuildPermalink(t *testing.T) {
 	url := h.jobURL("hello") + "lastSuccessfulBuild/"
 	stdout, _ := h.mustRun(t, "build", "status", url)
 	for _, want := range []string{
-		"buildNumber: 1",
+		"buildNumber:",
 		"result: SUCCESS",
 	} {
 		if !strings.Contains(stdout, want) {

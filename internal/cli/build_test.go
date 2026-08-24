@@ -16,6 +16,7 @@ package cli
 //     adjustments to the error mapping.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +32,88 @@ import (
 
 	jkerrors "github.com/addozhang/jk/internal/errors"
 )
+
+func Test_BuildArtifacts_ListPermalinkJSON(t *testing.T) {
+	srv := newMux(t).handle("/job/svc/lastSuccessfulBuild/api/json", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("tree"); got != "number,url,artifacts[fileName,relativePath]" {
+			t.Errorf("tree = %q", got)
+		}
+		fmt.Fprintf(w, `{"number":42,"url":%q,"artifacts":[{"fileName":"app.zip","relativePath":"dist/app.zip"},{"fileName":"index.html","relativePath":"reports/index.html"}]}`, "http://jenkins/job/svc/42/")
+	}).server()
+	defer srv.Close()
+
+	stdout, _, err := runJK(t, []string{"build", "artifacts", srv.URL + "/job/svc/lastSuccessfulBuild/", "-o", "json"})
+	if err != nil {
+		t.Fatalf("build artifacts: %v", err)
+	}
+	for _, want := range []string{`"buildNumber":42`, `"relativePath":"dist/app.zip"`, `"relativePath":"reports/index.html"`} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %s: %s", want, stdout)
+		}
+	}
+}
+
+func Test_BuildArtifacts_EmptyList(t *testing.T) {
+	srv := newMux(t).handle("/job/svc/42/api/json", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"number":42,"url":"http://jenkins/job/svc/42/"}`)
+	}).server()
+	defer srv.Close()
+	stdout, _, err := runJK(t, []string{"build", "artifacts", srv.URL + "/job/svc/42/", "-o", "json"})
+	if err != nil || !strings.Contains(stdout, `"artifacts":[]`) {
+		t.Fatalf("stdout=%s err=%v", stdout, err)
+	}
+}
+
+func Test_BuildArtifact_DownloadAndMembership(t *testing.T) {
+	var contentRequests atomic.Int32
+	srv := newMux(t).
+		handle("/job/svc/42/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":42,"url":"http://jenkins/job/svc/42/","artifacts":[{"fileName":"app.bin","relativePath":"dist/app.bin"}]}`)
+		}).
+		handle("/job/svc/42/artifact/dist/app.bin", func(w http.ResponseWriter, _ *http.Request) {
+			contentRequests.Add(1)
+			_, _ = w.Write([]byte{0, 1, 2, 255})
+		}).server()
+	defer srv.Close()
+
+	destination := filepath.Join(t.TempDir(), "app.bin")
+	_, _, err := runJK(t, []string{"build", "artifact", srv.URL + "/job/svc/42/", "dist/app.bin", "--destination", destination})
+	if err != nil {
+		t.Fatalf("build artifact: %v", err)
+	}
+	got, _ := os.ReadFile(destination)
+	if !bytes.Equal(got, []byte{0, 1, 2, 255}) {
+		t.Fatalf("content = %v", got)
+	}
+	_, _, err = runJK(t, []string{"build", "artifact", srv.URL + "/job/svc/42/", "missing.bin", "--destination", filepath.Join(t.TempDir(), "missing.bin")})
+	if err == nil || contentRequests.Load() != 1 {
+		t.Fatalf("missing artifact error=%v contentRequests=%d", err, contentRequests.Load())
+	}
+}
+
+func Test_BuildArtifactsFetch_PreservesPathsAndStopsOnFailure(t *testing.T) {
+	var thirdRequests atomic.Int32
+	srv := newMux(t).
+		handle("/job/svc/42/api/json", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"number":42,"url":"http://jenkins/job/svc/42/","artifacts":[{"fileName":"app.txt","relativePath":"dist/app.txt"},{"fileName":"bad.txt","relativePath":"reports/bad.txt"},{"fileName":"later.txt","relativePath":"later.txt"}]}`)
+		}).
+		handle("/job/svc/42/artifact/dist/app.txt", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "app") }).
+		handle("/job/svc/42/artifact/reports/bad.txt", func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "broken", http.StatusInternalServerError) }).
+		handle("/job/svc/42/artifact/later.txt", func(w http.ResponseWriter, _ *http.Request) { thirdRequests.Add(1) }).server()
+	defer srv.Close()
+
+	dir := t.TempDir()
+	_, _, err := runJK(t, []string{"build", "artifacts", "fetch", srv.URL + "/job/svc/42/", "--directory", dir})
+	if err == nil || !strings.Contains(err.Error(), "reports/bad.txt") {
+		t.Fatalf("error = %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "dist", "app.txt")); string(got) != "app" {
+		t.Fatalf("first artifact = %q", got)
+	}
+	if thirdRequests.Load() != 0 {
+		t.Fatal("bulk fetch did not stop on failure")
+	}
+}
 
 // muxBuilder is a tiny helper that lets each test declaratively wire
 // path → handler pairs without re-typing the http.ServeMux boilerplate.

@@ -1,6 +1,6 @@
 ---
 name: jk-jenkins-cli
-description: Operate Jenkins from AI coding agents using the `jk` CLI. Use this skill whenever the user mentions Jenkins, Jenkins Pipeline, CI failures, build logs, failed deployments, pending Jenkins input steps, or asks an agent to inspect, trigger, watch, retry, or debug Jenkins builds from a terminal.
+description: Operate Jenkins from AI coding agents using the `jk` CLI. Use this skill whenever the user mentions Jenkins, Jenkins Pipeline, CI failures, build logs, archived artifacts or reports, failed deployments, pending Jenkins input steps, or asks an agent to inspect, trigger, watch, retry, download, or debug Jenkins builds from a terminal.
 ---
 
 # jk Jenkins CLI
@@ -15,7 +15,7 @@ Use `jk` to inspect and operate Jenkins Pipelines from the terminal.
 - Credentials are selected by normalized Jenkins host.
 - Output is stable and self-owned. Prefer `-o json` for agent parsing, YAML for humans, and `-o raw` only when a command is explicitly raw/log-oriented.
 - The tool is Pipeline-focused. Do not expect plugin, agent, credential-store, Freestyle, or Jenkinsfile-editing administration commands.
-- It can verify the authenticated Jenkins identity, inspect pipelines, trigger or rebuild builds, watch builds, read logs, inspect stages, inspect submitted parameters, and respond to pending Pipeline `input` steps.
+- It can verify the authenticated Jenkins identity, inspect pipelines, trigger or rebuild builds, watch builds, read logs, inspect stages and submitted parameters, fetch archived artifacts, and respond to pending Pipeline `input` steps.
 
 ## First Move
 
@@ -40,6 +40,9 @@ jk build trigger <pipeline-url> [-p KEY=VALUE ...] [--watch]
 jk build rebuild <build-url>
 jk build status <build-url> -o json
 jk build params <build-url> -o json
+jk build artifacts <build-url> -o json
+jk build artifact <build-url> <relative-path> --destination <file> [--force]
+jk build artifacts fetch <build-url> --directory <dir> [--force]
 jk build stages <build-url> -o json
 jk build logs <build-url> [--stage NAME] [-f]
 jk build input <build-url> proceed|abort [--input-id ID] [-p KEY=VALUE ...]
@@ -131,6 +134,39 @@ Safety rules:
 - If Jenkins redacted a password or credential parameter, or a recorded parameter no longer exists, do not guess or omit it. Explain the error and use `jk build trigger -p KEY=VALUE` only after the user supplies or authorizes explicit replacement values.
 - Rebuild reproduces recorded parameters only. It does not reproduce workspaces, environment variables, SCM revisions, causes, or plugin-specific state.
 
+### Fetch Archived Artifacts and Reports
+
+Treat reports as ordinary artifacts when the Pipeline published them with `archiveArtifacts`. `jk` does not discover plugin-specific report APIs, Pipeline stashes, workspace files, or files that Jenkins did not archive.
+
+List metadata before downloading when the exact relative path is unknown:
+
+```sh
+jk build artifacts https://jenkins.example.com/job/app/42 -o json
+```
+
+Download one known artifact to an explicit file:
+
+```sh
+jk build artifact https://jenkins.example.com/job/app/42 dist/app.zip \
+  --destination ./app.zip
+```
+
+Download all artifacts while preserving their archived directory structure:
+
+```sh
+jk build artifacts fetch https://jenkins.example.com/job/app/42 \
+  --directory ./artifacts
+```
+
+Artifact rules:
+
+- Numeric build URLs and Jenkins build permalinks are accepted. Prefer a numeric build URL when reproducibility matters because a permalink can point to a newer build later.
+- Single-file fetch requires an exact `relativePath` from `build artifacts`; do not guess from `fileName` when multiple directories may contain the same name.
+- Downloads stream to temporary files and become visible only after completion. Existing files are rejected unless `--force` is supplied.
+- `--force` only replaces regular files. The CLI rejects directory, symlink, traversal, absolute, and escaping artifact paths.
+- Bulk fetch is sequential and fail-fast. Files completed before an error remain in place; report the failing `relativePath` and do not claim the directory is complete.
+- Do not use `-o raw` to download artifact content. Use `--destination` or `--directory`.
+
 ### Handle a Pending Input Step
 
 For any pending input request, inspect the gate before asking for approval or changing state. If the user asks to approve a pending input but has not explicitly authorized `proceed`, answer with the read-only inspection command first, then ask for confirmation.
@@ -200,6 +236,7 @@ Prefer `-o json` for commands whose output will be parsed or summarized:
 
 ```sh
 jk build status <build-url> -o json
+jk build artifacts <build-url> -o json
 jk build stages <build-url> -o json
 jk pipeline params <pipeline-url> -o json
 ```
@@ -220,9 +257,12 @@ jk auth list ...
 jk auth whoami ...
 jk build status ...
 jk build params ...
+jk build artifacts ...
 jk build stages ...
 jk build logs ...
 ```
+
+Artifact downloads write local files but do not mutate Jenkins. Before using `--force`, confirm that replacing the local destination is intended.
 
 State-changing commands need clear user intent:
 
@@ -254,6 +294,8 @@ Common cases:
 - Unclear authenticated identity: run `jk auth whoami <url> -o json`; never inspect or print the credentials file.
 - Unknown parameter: run `jk pipeline params <pipeline-url> -o json` and retry with valid names.
 - Rebuild parameter unavailable or removed: do not retry by dropping it; inspect `jk build params <build-url> -o json` and require explicit replacement values through `jk build trigger`.
+- Artifact not found: run `jk build artifacts <build-url> -o json` and use the exact `relativePath`; confirm the Pipeline archived the file and retention has not deleted it.
+- Artifact destination exists: choose another path or use `--force` only when replacing that regular local file is intended.
 - TLS failure: prefer `SSL_CERT_FILE`; avoid `--insecure` unless explicitly acceptable.
 - `PENDING_INPUT`: inspect `pendingInput`; use `--input-id` when ambiguous; do not auto-proceed without user intent.
 
