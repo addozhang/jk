@@ -14,6 +14,7 @@
 // keyringDelete) rather than direct calls: tests substitute them with an
 // in-memory fake, and a future alternative backend only needs to rewire
 // these three hooks. Production wiring is zalando/go-keyring.
+
 package auth
 
 import (
@@ -81,7 +82,11 @@ func storeTokenInKeyring(key, token string) error {
 // ignored: a stale keyring entry is a hygiene issue, not a reason to fail
 // a Remove that already succeeded against the file.
 func deleteTokenFromKeyring(key string) {
-	_ = keyringDelete(keyringService, key)
+	if err := keyringDelete(keyringService, key); err != nil {
+		// Best-effort by design: a stale keyring entry is a hygiene issue,
+		// not a reason to fail a Remove that already succeeded on the file.
+		return
+	}
 }
 
 // SecureHosts returns the hosts whose API tokens live in the OS keyring
