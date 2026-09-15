@@ -116,6 +116,12 @@ type AuthList struct {
 	// form, in insertion order. Empty array when no credentials are
 	// configured; never null.
 	Hosts []string `json:"hosts"`
+	// Secure lists the hosts whose API token is stored in the OS keyring
+	// (via `jk auth add --secure-storage`) instead of the credentials
+	// file. Additive field, experimental tier; always present, empty
+	// array when every token lives in the credentials file. Hosts appear
+	// in the same insertion order as the Hosts field.
+	Secure []string `json:"secure"`
 }
 
 // AuthWhoAmI is the response of `jk auth whoami`. Stability: experimental.

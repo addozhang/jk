@@ -100,6 +100,14 @@ jk auth add https://jenkins.example.com
 
 Credentials are stored in `~/.config/jk/credentials` (mode `0600`, TOML format). Tokens are never printed by any `jk` command.
 
+To keep the API token out of the credentials file entirely, store it in the OS keyring with `--secure-storage` (or set `JK_SECURE_STORAGE=1`):
+
+```sh
+jk auth add --secure-storage https://jenkins.example.com
+```
+
+The file then records only the username plus a secure marker for the host; the token is fetched from the keyring on every request and is removed again by `jk auth remove`. Re-running `jk auth add` for the same host without the flag migrates the credential back to file storage. `jk auth list` reports which hosts are keyring-backed via the `secure` field (see `docs/schema.md` §3.1).
+
 Verify which Jenkins identity those credentials select without printing the token:
 
 ```sh

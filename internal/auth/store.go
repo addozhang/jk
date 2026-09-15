@@ -31,6 +31,12 @@
 // (tempfile + rename) on every mutation. This is safe and simple for the
 // expected scale (handfuls of hosts); we will revisit if file size becomes
 // a bottleneck.
+//
+// Secure storage (opt-in): a credential flagged `secure = true` keeps its
+// API token in the OS keyring (see keyring.go), and the TOML entry carries
+// only the username plus the flag — the `token` field is empty on disk.
+// Get and Resolve populate Token from the keyring transparently, so
+// callers never need to know where a token physically lives.
 package auth
 
 import (
@@ -51,6 +57,13 @@ import (
 type Credential struct {
 	Username string
 	Token    string
+	// Secure marks the token as stored in the OS keyring (keyring.go)
+	// instead of the TOML file. When true, Token MUST be empty on disk:
+	// Add routes the token to the keyring and persists only the flag,
+	// while Get/Resolve fetch the token from the keyring under the host
+	// key. The `omitempty` tag keeps the credentials file clean for the
+	// (default) file-storage case.
+	Secure bool `toml:"secure,omitempty"`
 }
 
 // Store is the persistence interface for credentials. Implementations MUST
@@ -60,12 +73,18 @@ type Credential struct {
 type Store interface {
 	// Add inserts or overwrites the credential for host. Insertion order
 	// is preserved across Add calls; overwriting an existing host does
-	// NOT change its position in the order.
+	// NOT change its position in the order. A credential with Secure set
+	// stores its token in the OS keyring first and persists an empty
+	// Token to the file; re-adding a host with file storage cleans up any
+	// keyring token left by a previous secure entry.
 	Add(host string, c Credential) error
 
 	// Get returns the credential for host. The boolean is false if no
 	// entry exists for host; in that case the returned Credential is
-	// zero-valued and the error is nil.
+	// zero-valued and the error is nil. For secure entries the Token
+	// field is populated from the OS keyring; a missing or unreadable
+	// keyring token is an error (the entry still reports ok=true since
+	// it exists in the file).
 	Get(host string) (Credential, bool, error)
 
 	// Resolve selects the most specific stored credential for a request
@@ -243,7 +262,10 @@ func (s *fileStore) ensureParentDir() error {
 	return nil
 }
 
-// Add implements [Store.Add].
+// Add implements [Store.Add]. Secure ordering matters: the token goes to
+// the keyring BEFORE the file is written, so a keyring failure leaves the
+// file untouched (no secure marker pointing at a token that was never
+// stored, and no half-migrated previous entry).
 func (s *fileStore) Add(host string, c Credential) error {
 	if host == "" {
 		return errors.New("auth: host key must not be empty")
@@ -252,6 +274,19 @@ func (s *fileStore) Add(host string, c Credential) error {
 	if err != nil {
 		return err
 	}
+	if c.Secure {
+		// The keyring overwrites any stale token for this host, so a
+		// secure→secure re-add is self-cleaning; no explicit delete.
+		if err := storeTokenInKeyring(host, c.Token); err != nil {
+			return err
+		}
+		// The file must not carry the token once the keyring owns it.
+		c.Token = ""
+	} else if prev, ok := shape.Hosts[host]; ok && prev.Secure {
+		// File-storage re-add over a secure entry: drop the now-orphaned
+		// keyring token. Best-effort (see deleteTokenFromKeyring).
+		deleteTokenFromKeyring(host)
+	}
 	if _, exists := shape.Hosts[host]; !exists {
 		shape.Order = append(shape.Order, host)
 	}
@@ -259,14 +294,23 @@ func (s *fileStore) Add(host string, c Credential) error {
 	return s.save(shape)
 }
 
-// Get implements [Store.Get].
+// Get implements [Store.Get]. For secure entries the token is resolved
+// from the OS keyring; see tokenFor for the error policy.
 func (s *fileStore) Get(host string) (Credential, bool, error) {
 	shape, err := s.load()
 	if err != nil {
 		return Credential{}, false, err
 	}
 	c, ok := shape.Hosts[host]
-	return c, ok, nil
+	if !ok {
+		return Credential{}, false, nil
+	}
+	token, err := tokenFor(host, c)
+	if err != nil {
+		return Credential{}, true, err
+	}
+	c.Token = token
+	return c, true, nil
 }
 
 // Resolve implements [Store.Resolve]. It performs a single linear scan of
@@ -312,7 +356,15 @@ func (s *fileStore) Resolve(reqURL *url.URL) (string, Credential, bool, error) {
 	if !found {
 		return "", Credential{}, false, nil
 	}
-	return bestKey, shape.Hosts[bestKey], true, nil
+	// Resolve the token like Get does, so secure entries are transparent
+	// to the transport layer.
+	c := shape.Hosts[bestKey]
+	token, err := tokenFor(bestKey, c)
+	if err != nil {
+		return "", Credential{}, true, err
+	}
+	c.Token = token
+	return bestKey, c, true, nil
 }
 
 // splitOriginPath splits a stored credential key into its normalized origin
@@ -364,6 +416,14 @@ func (s *fileStore) List() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return orderedHosts(shape), nil
+}
+
+// orderedHosts is the shared host-ordering core of List and SecureHosts:
+// Order first (filtered to live entries, deduplicated), then any
+// hand-edited host tables missing from Order in unspecified-but-stable
+// decode order.
+func orderedHosts(shape *fileShape) []string {
 	out := make([]string, 0, len(shape.Order))
 	seen := make(map[string]struct{}, len(shape.Order))
 	for _, h := range shape.Order {
@@ -376,10 +436,6 @@ func (s *fileStore) List() ([]string, error) {
 		seen[h] = struct{}{}
 		out = append(out, h)
 	}
-	// Hand-edited files may have host tables not listed in Order; append
-	// them after the ordered set so they remain visible. They appear in
-	// TOML iteration order, which is unspecified but stable within a
-	// single decode.
 	for h := range shape.Hosts {
 		if _, ok := seen[h]; ok {
 			continue
@@ -387,18 +443,25 @@ func (s *fileStore) List() ([]string, error) {
 		seen[h] = struct{}{}
 		out = append(out, h)
 	}
-	return out, nil
+	return out
 }
 
 // Remove implements [Store.Remove]. Idempotent: removing a missing host is
-// not an error so that scripted cleanup is safe to re-run.
+// not an error so that scripted cleanup is safe to re-run. When the removed
+// entry was secure, the matching OS keyring token is deleted best-effort —
+// the file removal already succeeded, so a keyring hiccup (or a token that
+// was deleted out-of-band) is not reported as a Remove failure.
 func (s *fileStore) Remove(host string) error {
 	shape, err := s.load()
 	if err != nil {
 		return err
 	}
-	if _, exists := shape.Hosts[host]; !exists {
+	prev, exists := shape.Hosts[host]
+	if !exists {
 		return nil
+	}
+	if prev.Secure {
+		deleteTokenFromKeyring(host)
 	}
 	delete(shape.Hosts, host)
 	// Drop host from Order while preserving the position of remaining

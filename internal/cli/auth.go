@@ -27,6 +27,13 @@ package cli
 //     spec's "prompts for confirmation" phrasing is satisfied by the
 //     explicit `--force` flag, which is louder than a typeable "y".
 //
+//   - Secure storage (opt-in): `--secure-storage` (or JK_SECURE_STORAGE=1)
+//     routes the token to the OS keyring via the auth package; the
+//     credentials file then records only the username for the host. All
+//     keyring interaction lives in internal/auth so the injectable
+//     keyring hooks stay testable; the CLI only passes the Secure flag
+//     through and mirrors the choice in its confirmation message.
+//
 //   - `add` and `remove` print human-readable confirmations to stderr
 //     and do NOT emit structured output (per docs/schema.md §3.2);
 //     `list` renders schema.AuthList to stdout via the normal output
@@ -83,6 +90,15 @@ var readSecret = func(prompt string, in *bufio.Reader, out io.Writer) (string, e
 		return "", err
 	}
 	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// secureHostLister is the optional capability a Store may implement to
+// report which hosts keep their token in the OS keyring. It is an
+// interface upgrade rather than a Store method so alternate Store
+// implementations (test fakes, future backends) stay valid without
+// growing keyring-aware code they do not need.
+type secureHostLister interface {
+	SecureHosts() ([]string, error)
 }
 
 // newAuthCommand returns the `jk auth` parent + its three subcommands.
@@ -174,6 +190,7 @@ func normalizeWhoAmIURL(raw string) (string, error) {
 
 func newAuthAddCommand(flags *GlobalFlags) *cobra.Command {
 	var force bool
+	var secureStorage bool
 	cmd := &cobra.Command{
 		Use:   "add <host>",
 		Short: "Store API token for a Jenkins host",
@@ -184,18 +201,24 @@ the path before the first /job/ segment, or the whole path when there is
 no /job/). Job hierarchy and trailing slashes are discarded. The
 confirmation message names the exact key that was stored.
 
+With --secure-storage (or JK_SECURE_STORAGE=1) the API token is stored
+in the OS keyring instead of the credentials file; the file records only
+the username for the host. Re-adding the host without --secure-storage
+migrates it back to file storage and deletes the keyring entry.
+
 If an entry already exists for the key, the command refuses to
 overwrite without --force.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAuthAdd(cmd, flags, args[0], force)
+			return runAuthAdd(cmd, flags, args[0], force, secureStorage)
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing credential without confirmation")
+	cmd.Flags().BoolVar(&secureStorage, "secure-storage", false, "store the API token in the OS keyring instead of the credentials file")
 	return cmd
 }
 
-func runAuthAdd(cmd *cobra.Command, _ *GlobalFlags, rawHost string, force bool) error {
+func runAuthAdd(cmd *cobra.Command, _ *GlobalFlags, rawHost string, force, secureStorage bool) error {
 	host, err := normalizeAuthHost(rawHost)
 	if err != nil {
 		return err
@@ -242,10 +265,18 @@ func runAuthAdd(cmd *cobra.Command, _ *GlobalFlags, rawHost string, force bool) 
 		}
 	}
 
-	if err := store.Add(host, auth.Credential{Username: username, Token: token}); err != nil {
+	// The env var makes secure storage scriptable (CI, agent setups)
+	// without rewriting the command line; the flag always wins. The
+	// keyring round-trip itself happens inside auth store.Add.
+	secure := secureStorage || os.Getenv("JK_SECURE_STORAGE") == "1"
+	if err := store.Add(host, auth.Credential{Username: username, Token: token, Secure: secure}); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stderr, "Stored credentials for %s.\n", host); err != nil {
+	storage := "the credentials file"
+	if secure {
+		storage = "the OS keyring"
+	}
+	if _, err := fmt.Fprintf(stderr, "Stored credentials for %s (token in %s).\n", host, storage); err != nil {
 		return err
 	}
 	return nil
@@ -259,7 +290,7 @@ func newAuthListCommand(flags *GlobalFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List configured Jenkins hosts",
-		Long:  "Prints the configured hosts to stdout in insertion order. Never prints tokens. See docs/schema.md §3.1 for the response shape.",
+		Long:  "Prints the configured hosts to stdout in insertion order, plus which hosts keep their token in the OS keyring. Never prints tokens. See docs/schema.md §3.1 for the response shape.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAuthList(cmd, flags)
@@ -282,8 +313,22 @@ func runAuthList(cmd *cobra.Command, flags *GlobalFlags) error {
 	if hosts == nil {
 		hosts = []string{}
 	}
+	// Additive schema field (docs/schema.md §3.1): which hosts keep
+	// their token in the OS keyring. Optional-interface upgrade so the
+	// core Store interface stays keyring-agnostic; a Store without the
+	// capability simply reports an empty list.
+	secure := []string{}
+	if sl, ok := store.(secureHostLister); ok {
+		secure, err = sl.SecureHosts()
+		if err != nil {
+			return err
+		}
+		if secure == nil {
+			secure = []string{}
+		}
+	}
 	cc := &commandContext{cmd: cmd, flags: flags, stderr: cmd.ErrOrStderr()}
-	return cc.render(schema.AuthList{Hosts: hosts})
+	return cc.render(schema.AuthList{Hosts: hosts, Secure: secure})
 }
 
 // ---------------------------------------------------------------------------

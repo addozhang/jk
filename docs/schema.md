@@ -74,10 +74,13 @@ Returns the configured Jenkins hosts. Never includes API tokens.
 | Field | Type | Tier | Description |
 |---|---|---|---|
 | `hosts` | `string[]` | `stable` | Array of credential keys (`scheme://host[:port]` plus an optional context path, e.g. `https://ci.example.com/team-a`), in insertion order. Empty array when no credentials are configured. |
+| `secure` | `string[]` | `experimental` | Subarray of `hosts`: hosts whose API token is stored in the OS keyring (added via `jk auth add --secure-storage`) instead of the credentials file, in the same insertion order. Empty array when every token lives in the credentials file. |
 
 ### 3.2 `jk auth add <host>` / `jk auth remove <host>`
 
-These commands print a human-readable confirmation to stderr and do not emit structured output. No schema.
+These commands print a human-readable confirmation to stderr and do not emit structured output. No schema. The confirmation names the credential key and where the token is kept (`token in the credentials file` or `token in the OS keyring`).
+
+By default the API token is written to the credentials file. With `--secure-storage` (or `JK_SECURE_STORAGE=1`) the token is stored in the OS keyring instead and the file records only the username plus a secure marker; `jk auth remove` deletes the matching keyring entry. Re-adding a host without `--secure-storage` migrates the credential back to file storage and removes the keyring entry.
 
 The credential key is `scheme://host[:non-default-port]` plus an optional **context path** — the URL segments before the first `/job/` (a bare host or a pure `/job/...` URL yields no path; default ports `:80`/`:443` are dropped). Commands resolve a request URL to the most specific stored key that is a segment-boundary path-prefix of the URL, falling back to a host-only key when no context path matches. This lets several Jenkins instances on one host each carry a distinct credential while a plain host key still covers every path beneath it.
 
