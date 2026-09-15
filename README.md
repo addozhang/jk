@@ -36,7 +36,7 @@ Requires Go 1.22+. The Go toolchain fetches the module directly from GitHub; no 
 
 ### Download a pre-built binary
 
-Download `jk_<version>_<os>_<arch>.tar.gz` from the [Releases page](https://github.com/addozhang/jk/releases), extract, and move `jk` onto your `PATH`.
+Download `jk_<version>_<os>_<arch>.tar.gz` (Windows builds ship as `.zip`) from the [Releases page](https://github.com/addozhang/jk/releases), extract, and move `jk` onto your `PATH`.
 
 ## Quick start
 
